@@ -1,0 +1,10 @@
+[package]
+name = "jei_optional"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Keeps integrations in the build only when what they work with is there; picks the newest kit."
+
+[lib]
+proc-macro = true
+path = "src/lib.rs"

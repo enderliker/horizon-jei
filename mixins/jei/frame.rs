@@ -3,4 +3,5 @@
 fn jei_frame(game: &mut crate::game::Game<'_>) {
     crate::game::jei_glue::sync(game);
     crate::game::jei_glue::flush(game);
+    crate::game::hz_kit_layer_jei::frame(game);
 }

@@ -12,6 +12,16 @@ Parts of this mod's behaviour, tests, UI strings and (from Phase 3 on) a few
 GUI sprites are derived from JEI's source, which is MIT-licensed; the original
 copyright notice above applies to those parts.
 
+GUI sprites
+-----------
+
+content/jei/assets/jei/textures/gui/sprites/ holds the GUI sprites of
+JustEnoughItems for Minecraft 1.12 (the `1.12` branch at commit
+4f70a47889e97f72d2c344fead75e1065c60e13a, src/main/resources/assets/jei/
+textures/gui/sprites/), unchanged, under JEI's MIT License (copied beside them
+as license-jei.txt). JEI's gui_vanilla.png is not included: it is cut from
+Minecraft's own textures.
+
 This is an unofficial port. It is not made, endorsed or supported by mezz, the
 JEI team, Mojang, Microsoft, or the Horizon project.
 

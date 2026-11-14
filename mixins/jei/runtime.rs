@@ -778,7 +778,9 @@ pub enum Event {
         stack: Stack,
         right: bool,
     },
-    Action(usize),
+    /// The "+" of the recipe at this index; with Shift (`true`), as many
+    /// sets as the items allow.
+    Action(usize, bool),
 }
 
 /// What the game is to do.
@@ -803,7 +805,7 @@ pub enum Out {
     Give { item: String, count: u32 },
     /// Move the ingredients of this recipe-book id into the open crafting
     /// grid (`native_transfer_recipe`): JEI's "+", which needs no unlock.
-    Transfer { book_id: i32 },
+    Transfer { book_id: i32, all: bool },
     /// A line only this player sees.
     Say(String),
 }
@@ -985,7 +987,8 @@ impl Bookmarks {
 
     /// Where a stack is bookmarked: the same item and the same components.
     pub fn position(&self, stack: &Stack) -> Option<usize> {
-        (self.slots.iter()).position(|s| s.item == stack.item && s.components == stack.components)
+        let key = subtype_key(&stack.components);
+        (self.slots.iter()).position(|s| s.item == stack.item && subtype_key(&s.components) == key)
     }
 
     pub fn toggle(&mut self, stack: &Stack) -> Toggle {
@@ -996,11 +999,8 @@ impl Bookmarks {
         if self.slots.len() >= BOOKMARKS_MAX {
             return Toggle::Full;
         }
-        self.slots.push(Stack {
-            item: stack.item.clone(),
-            count: 1,
-            components: stack.components.clone(),
-        });
+        // A bookmark is the ingredient: a worn tool bookmarks the tool.
+        self.slots.push(ingredient_of(stack));
         Toggle::Added(self.slots.len() - 1)
     }
 
@@ -1221,16 +1221,6 @@ impl Bar {
         self.columns * self.rows
     }
 
-    /// The whole bar.
-    pub fn rect(&self) -> [f32; 4] {
-        [
-            self.origin[0],
-            self.origin[1],
-            self.columns as f32 * BOOKMARK_SLOT,
-            self.rows as f32 * BOOKMARK_SLOT,
-        ]
-    }
-
     /// Slot `index`'s place: column by column, from the top.
     pub fn slot(&self, index: usize) -> [f32; 4] {
         let column = index % self.columns;
@@ -1331,9 +1321,108 @@ impl Found<'_> {
     }
 }
 
-/// The same item, and the same components when `want` names some.
+/// The components that make an item a different ingredient, as JEI's subtype
+/// interpreters say: a potion's contents, an enchanted book's enchantments, a
+/// goat horn's sound, an ominous bottle's level, a stew's effects. Damage,
+/// names, enchantments on gear and the rest don't: a worn rod is a rod.
+const SUBTYPES: &[&str] = &[
+    "potion_contents",
+    "stored_enchantments",
+    "instrument",
+    "ominous_bottle_amplifier",
+    "suspicious_stew_effects",
+];
+
+/// `components` (`[minecraft:damage=3,minecraft:potion_contents={...}]`) cut
+/// to the ones in [`SUBTYPES`], in their order; "" when none is left.
+pub fn subtype_key(components: &str) -> String {
+    let inner = components.trim();
+    let inner = inner
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(inner);
+    let mut kept = Vec::new();
+    let (mut depth, mut quote, mut start) = (0i32, None::<char>, 0usize);
+    let bytes: Vec<(usize, char)> = inner.char_indices().collect();
+    let mut parts = Vec::new();
+    for &(i, c) in &bytes {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '{' | '[' | '(') => depth += 1,
+            (None, '}' | ']' | ')') => depth -= 1,
+            (None, ',') if depth == 0 => {
+                parts.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&inner[start..]);
+    for part in parts {
+        let part = part.trim();
+        let key = part.split(['=', '~']).next().unwrap_or("").trim();
+        let key = key.strip_prefix('!').unwrap_or(key);
+        let name = key.strip_prefix("minecraft:").unwrap_or(key);
+        if !part.is_empty() && SUBTYPES.contains(&name) {
+            kept.push(part);
+        }
+    }
+    if kept.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", kept.join(","))
+    }
+}
+
+/// `stack` as an ingredient: one, its subtype components only.
+pub fn ingredient_of(stack: &Stack) -> Stack {
+    Stack {
+        item: stack.item.clone(),
+        count: 1,
+        components: subtype_key(&stack.components),
+    }
+}
+
+/// `recipes` with each recipe once: the window's own tables and the server's
+/// (the data pack recipes it sent) can both hold one. The copy the recipe book
+/// numbers (`book_id` >= 0) is kept, as "+" needs it.
+pub fn dedupe_recipes(recipes: Vec<Recipe>) -> Vec<Recipe> {
+    let key = |r: &Recipe| {
+        format!(
+            "{:?}|{}|{}|{:?}|{:?}|{}|{}",
+            r.kind, r.width, r.height, r.slots, r.results, r.cooking_time, r.experience
+        )
+    };
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut out: Vec<Recipe> = Vec::with_capacity(recipes.len());
+    for recipe in recipes {
+        match seen.get(&key(&recipe)) {
+            Some(&i) => {
+                if out[i].book_id < 0 && recipe.book_id >= 0 {
+                    out[i].book_id = recipe.book_id;
+                }
+            }
+            None => {
+                seen.insert(key(&recipe), out.len());
+                out.push(recipe);
+            }
+        }
+    }
+    out
+}
+
+/// The same item, and the same subtype when `want` has one.
 fn same(stack: &Stack, want: &Stack) -> bool {
-    stack.item == want.item && (want.components.is_empty() || stack.components == want.components)
+    stack.item == want.item && subtype_matches(&stack.components, &want.components)
+}
+
+/// Whether components `have` are the subtype `want` asks for (any, when it
+/// has none).
+fn subtype_matches(have: &str, want: &str) -> bool {
+    let want = subtype_key(want);
+    want.is_empty() || subtype_key(have) == want
 }
 
 impl Viewer {
@@ -1422,8 +1511,9 @@ impl Viewer {
         let Some(&index) = self.ids.get(item) else {
             return Counts::default();
         };
-        if !components.is_empty()
-            && let Some(counts) = self.counts.get(&(index, components.to_owned()))
+        let key = subtype_key(components);
+        if !key.is_empty()
+            && let Some(counts) = self.counts.get(&(index, key))
         {
             return *counts;
         }
@@ -1444,7 +1534,7 @@ impl Viewer {
     /// The same item, and the same components when `want` names some.
     fn matches(&self, ingredient: &Ingredient, want: &Stack) -> bool {
         self.id(ingredient.item) == want.item
-            && (want.components.is_empty() || ingredient.components == want.components)
+            && subtype_matches(&ingredient.components, &want.components)
     }
 
     /// The items the search keeps, each followed by its variants, in the
@@ -1543,10 +1633,8 @@ impl Viewer {
 
     /// Opens a page, pushing it on the history; says why when it is empty.
     fn open(&mut self, item: &Stack, uses: bool, grid: u32) -> Vec<Out> {
-        let item = Stack {
-            count: 1,
-            ..item.clone()
-        };
+        // A worn tool or a renamed stack looks up as the item it is.
+        let item = ingredient_of(item);
         let page = Page { item, uses, tab: 0 };
         if self.found(&page).is_empty() {
             let name = self.name(&page.item.item).to_owned();
@@ -1829,8 +1917,8 @@ impl Viewer {
                 vec![self.show(ctx.grid)]
             }
             Event::SlotClicked { stack, right } => self.open(&stack, right, ctx.grid),
-            Event::Action(i) => match self.shown.get(i) {
-                Some(&book) if book >= 0 => vec![Out::Transfer { book_id: book }],
+            Event::Action(i, all) => match self.shown.get(i) {
+                Some(&book) if book >= 0 => vec![Out::Transfer { book_id: book, all }],
                 _ => Vec::new(),
             },
         }
@@ -2742,8 +2830,22 @@ mod tests {
             },
             &context(3),
         );
-        let out = viewer.handle(super::Event::Action(0), &context(3));
-        assert_eq!(out, vec![super::Out::Transfer { book_id: 7 }]);
+        let out = viewer.handle(super::Event::Action(0, false), &context(3));
+        assert_eq!(
+            out,
+            vec![super::Out::Transfer {
+                book_id: 7,
+                all: false
+            }]
+        );
+        let out = viewer.handle(super::Event::Action(0, true), &context(3));
+        assert_eq!(
+            out,
+            vec![super::Out::Transfer {
+                book_id: 7,
+                all: true
+            }]
+        );
         // The smithing tab's recipe has no book id: its button does nothing.
         viewer.handle(
             super::Event::Key {
@@ -2753,7 +2855,7 @@ mod tests {
             &context(0),
         );
         viewer.handle(super::Event::Tab(1), &context(0));
-        let out = viewer.handle(super::Event::Action(0), &context(0));
+        let out = viewer.handle(super::Event::Action(0, false), &context(0));
         assert!(out.is_empty(), "{out:?}");
     }
 
@@ -2832,6 +2934,135 @@ mod tests {
                 notes: vec!["Cast off the edge.".into()],
             }],
         }
+    }
+
+    fn with_components(id: &str, components: &str) -> super::Stack {
+        super::Stack {
+            components: components.into(),
+            ..stack(id)
+        }
+    }
+
+    #[test]
+    fn the_same_recipe_from_two_tables_shows_once() {
+        let (_, recipes) = tables();
+        let mut twice = recipes.clone();
+        let mut copy = recipes[0].clone();
+        copy.book_id = -1;
+        twice.push(copy);
+        let mut numbered = recipes[1].clone();
+        numbered.book_id = 99;
+        twice[1].book_id = -1;
+        twice.push(numbered);
+        let once = super::dedupe_recipes(twice);
+        assert_eq!(once.len(), recipes.len());
+        assert_eq!(once[0].book_id, recipes[0].book_id);
+        assert_eq!(once[1].book_id, 99, "the numbered copy's id is kept");
+    }
+
+    #[test]
+    fn subtype_keys_keep_what_makes_an_ingredient() {
+        use super::subtype_key;
+        assert_eq!(subtype_key(""), "");
+        assert_eq!(subtype_key("[minecraft:damage=12]"), "");
+        assert_eq!(
+            subtype_key(r#"[minecraft:damage=3,minecraft:item_name="Twine Rod, the first"]"#),
+            ""
+        );
+        let potion = r#"minecraft:potion_contents={potion:"minecraft:swiftness"}"#;
+        assert_eq!(
+            subtype_key(&format!(
+                "[minecraft:damage=1,{potion},minecraft:custom_name=\"a,b\"]"
+            )),
+            format!("[{potion}]")
+        );
+        let book = "minecraft:stored_enchantments={levels:{\"minecraft:mending\":1}}";
+        assert_eq!(subtype_key(&format!("[{book}]")), format!("[{book}]"));
+    }
+
+    fn rods() -> super::Category {
+        let mut c = category();
+        c.catalysts = vec![
+            with_components(
+                "minecraft:fishing_rod",
+                r#"[minecraft:item_name="Twine Rod"]"#,
+            ),
+            stack("minecraft:fishing_rod"),
+        ];
+        c.recipes[0].outputs.push(super::Chance {
+            stack: stack("minecraft:fishing_rod"),
+            chance: 0.01,
+            min: 1,
+            max: 1,
+            notes: Vec::new(),
+        });
+        c
+    }
+
+    fn page_names(out: &[super::Out]) -> Vec<String> {
+        match out.first() {
+            Some(super::Out::Recipes { names, .. }) => names.clone(),
+            other => panic!("not a page: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_worn_tool_finds_its_recipes_and_its_categorys_uses() {
+        let (items, recipes) = tables();
+        let (mut viewer, _) = viewer(items, recipes, super::Lang::En);
+        viewer.set_categories(vec![rods()]);
+        // R on a rod with durability used: the rod's recipes (here, a catch).
+        let worn = with_components("minecraft:fishing_rod", "[minecraft:damage=40]");
+        let out = viewer.handle(
+            super::Event::Open {
+                stack: worn.clone(),
+                uses: false,
+            },
+            &context(0),
+        );
+        assert!(page_names(&out).contains(&"Void Fishing".to_owned()));
+        // U on a worn Twine Rod, a catalyst: the category it works in, as U on
+        // a furnace shows smelting.
+        let twine = with_components(
+            "minecraft:fishing_rod",
+            r#"[minecraft:damage=3,minecraft:item_name="Twine Rod"]"#,
+        );
+        let out = viewer.handle(
+            super::Event::Open {
+                stack: twine,
+                uses: true,
+            },
+            &context(0),
+        );
+        assert!(page_names(&out).contains(&"Void Fishing".to_owned()));
+        let out = viewer.handle(
+            super::Event::Open {
+                stack: worn,
+                uses: true,
+            },
+            &context(0),
+        );
+        assert!(page_names(&out).contains(&"Void Fishing".to_owned()));
+    }
+
+    #[test]
+    fn a_worn_tool_bookmarks_the_tool() {
+        let mut bookmarks = super::Bookmarks::default();
+        let worn = with_components("minecraft:fishing_rod", "[minecraft:damage=40]");
+        assert!(matches!(bookmarks.toggle(&worn), super::Toggle::Added(0)));
+        assert_eq!(bookmarks.get(0), Some(&stack("minecraft:fishing_rod")));
+        // The fresh rod is the same bookmark.
+        assert!(matches!(
+            bookmarks.toggle(&stack("minecraft:fishing_rod")),
+            super::Toggle::Removed(0)
+        ));
+        // A potion keeps what it is.
+        let potion = with_components(
+            "minecraft:potion",
+            r#"[minecraft:potion_contents={potion:"minecraft:swiftness"}]"#,
+        );
+        bookmarks.toggle(&potion);
+        assert_eq!(bookmarks.get(0), Some(&potion));
     }
 
     #[test]
@@ -3126,7 +3357,6 @@ mod tests {
         assert_eq!(bar.hit([23.0, 5.0], 1), None);
         assert_eq!(bar.hit([3.0, 5.0], 3), None);
         assert_eq!(bar.hit([5.0, 23.0], 0), None);
-        assert_eq!(bar.rect(), [4.0, 4.0, 36.0, 216.0]);
         assert_eq!(super::bookmark_bar(240.0).capacity(), 24);
     }
 

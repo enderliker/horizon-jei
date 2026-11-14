@@ -215,7 +215,7 @@ pub(super) fn sync(game: &mut Game<'_>) {
     };
     load();
     let sort = STATE.with(|s| s.borrow().config.sort);
-    let recipes = recipes(&catalog);
+    let recipes = jei::dedupe_recipes(recipes(&catalog));
     let found = jei::harvest_variants(&recipes, VARIANTS_PER_ITEM, jei::ITEMS_MAX);
     let (mut viewer, mut out) = Viewer::with_variants(items(&catalog), recipes, found, lang(game));
     if sort != viewer.sort() {
@@ -360,8 +360,7 @@ pub(super) fn screen_render_post(
     let bar = jei::bookmark_bar(batch.height);
     let count = bookmarks.len().min(bar.capacity());
     let hovered = bar.hit(screen.mouse, count);
-    // The bar's box first, so the screen shows through the slots.
-    game.native_fill(batch, bar.rect(), 0x5000_0000);
+    // As JEI's lists: the items with no box behind them.
     for index in 0..count {
         let rect = bar.slot(index);
         if hovered == Some(index) || drag.is_some_and(|drag| drag.from == index) {
@@ -781,7 +780,7 @@ fn apply(game: &mut Game<'_>, out: Out) -> Result<(), String> {
             for view in &mut views {
                 if !view.note.is_empty() {
                     view.note =
-                        jei::wrap(&view.note, 180.0, |t| game.native_text_width(t)).join("\n");
+                        jei::wrap(&view.note, 168.0, |t| game.native_text_width(t)).join("\n");
                 }
             }
             STATE.with(|s| {
@@ -805,7 +804,10 @@ fn apply(game: &mut Game<'_>, out: Out) -> Result<(), String> {
             Ok(())
         }
         Out::Give { item, count } => game.native_give(&item, count),
-        Out::Transfer { book_id } => {
+        Out::Transfer { book_id, all } => {
+            // Shift ("all") needs Horizon's native_transfer_recipe_all
+            // (horizon-rust/horizon#13528); until then one set moves.
+            let _ = all;
             game.native_transfer_recipe(book_id);
             Ok(())
         }
@@ -922,7 +924,7 @@ fn convert_event(event: &NativePanelEvent) -> Option<Event> {
             stack: stack_of(stack),
             right: *right,
         },
-        NativePanelEvent::Action(index) => Event::Action(*index as usize),
+        NativePanelEvent::Action(index) => Event::Action(*index as usize, false),
         _ => return None,
     })
 }
@@ -1129,8 +1131,77 @@ fn overlay_hit(overlay: &Overlay, gui: [f32; 2], point: [f32; 2]) -> Option<Hit>
     on.then_some(Hit::Inside)
 }
 
+/// JEI's GUI sprites (1.12's, MIT), from JEI's content half; when it isn't
+/// installed the screen draws the same shapes with fills.
+const SPRITES: &str = "jei:gui/sprites/";
+
+/// Sprite `name` of [`SPRITES`] stretched over `r` as a nine-slice with
+/// corners of `border` pixels; false when the sprite isn't there.
+fn nine(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    name: &str,
+    r: [f32; 4],
+    border: f32,
+) -> bool {
+    let name = format!("{SPRITES}{name}");
+    let Some([sw, sh]) = game.native_sprite_size(&name) else {
+        return false;
+    };
+    let [x, y, w, h] = r;
+    let b = border.min(w / 2.0).min(h / 2.0);
+    let cols = [
+        (0.0, b, x, b),
+        (b, sw - 2.0 * b, x + b, w - 2.0 * b),
+        (sw - b, b, x + w - b, b),
+    ];
+    let rows = [
+        (0.0, b, y, b),
+        (b, sh - 2.0 * b, y + b, h - 2.0 * b),
+        (sh - b, b, y + h - b, b),
+    ];
+    for (sx, sw_, dx, dw) in cols {
+        for (sy, sh_, dy, dh) in rows {
+            if dw > 0.0 && dh > 0.0 {
+                game.native_sprite(batch, &name, [sx, sy, sw_, sh_], [dx, dy, dw, dh]);
+            }
+        }
+    }
+    true
+}
+
+/// Icon `name` of [`SPRITES`] at its own size, centred in `r`.
+fn icon(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    name: &str,
+    r: [f32; 4],
+) -> bool {
+    let name = format!("{SPRITES}icons/{name}");
+    let Some([w, h]) = game.native_sprite_size(&name) else {
+        return false;
+    };
+    let at = [
+        (r[0] + (r[2] - w) / 2.0).floor(),
+        (r[1] + (r[3] - h) / 2.0).floor(),
+        w,
+        h,
+    ];
+    game.native_sprite(batch, &name, [0.0, 0.0, w, h], at)
+}
+
+/// The recipe window: JEI's beveled grey panel.
 fn frame_box(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, r: [f32; 4]) {
     let [x, y, w, h] = r;
+    if nine(
+        game,
+        batch,
+        "gui_background",
+        [x - 1.0, y - 1.0, w + 2.0, h + 2.0],
+        4.0,
+    ) {
+        return;
+    }
     game.native_fill(batch, [x - 1.0, y - 1.0, w + 2.0, h + 2.0], OUTLINE);
     game.native_fill(batch, r, PANEL_BG);
     game.native_fill(batch, [x, y, w - 1.0, 1.0], PANEL_LIGHT);
@@ -1140,6 +1211,9 @@ fn frame_box(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, r: [f32
 }
 
 fn slot_box(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, r: [f32; 4]) {
+    if nine(game, batch, "slot", r, 1.0) {
+        return;
+    }
     let [x, y, w, h] = r;
     game.native_fill(batch, r, SLOT_BG);
     game.native_fill(batch, [x, y, w - 1.0, 1.0], SLOT_DARK);
@@ -1156,6 +1230,36 @@ fn button_box(
     on: bool,
     hovered: bool,
 ) {
+    let sprite = match (on, hovered) {
+        (false, _) => "button_disabled",
+        (true, true) => "button_highlight",
+        (true, false) => "button_enabled",
+    };
+    if nine(game, batch, sprite, r, 3.0) {
+        // JEI's arrows and transfer icon on its buttons; any other label as text.
+        let drawn = match label {
+            "<" => icon(game, batch, "arrow_previous", r),
+            ">" => icon(game, batch, "arrow_next", r),
+            "+" => icon(game, batch, "recipe_transfer", r),
+            _ => false,
+        };
+        if drawn {
+            if !on {
+                game.native_fill(batch, r, 0x60_00_00_00);
+            }
+            return;
+        }
+        let w = game.native_text_width(label);
+        let color = if on { 0xFF_FF_FF } else { 0xA0_A0_A0 };
+        game.native_text(
+            batch,
+            label,
+            [(r[0] + (r[2] - w) / 2.0).round(), r[1] + (r[3] - 8.0) / 2.0],
+            color,
+            true,
+        );
+        return;
+    }
     let fill = match (on, hovered) {
         (false, _) => 0xFF_6E_6E_6E,
         (true, true) => 0xFF_8C_9A_D8,
@@ -1223,25 +1327,58 @@ fn draw_overlay(
     // The screen under it dims, as under a vanilla screen opened over another.
     game.native_fill(batch, rect, DIM);
     let hit = overlay_hit(overlay, gui, mouse);
-    // Tabs: the selected one joins the window.
-    for (i, rect) in &g.tabs {
-        let selected = *i == overlay.tab;
-        let r = if selected {
-            [rect[0], rect[1], rect[2] - 1.0, rect[3] + 2.0]
-        } else {
-            [rect[0], rect[1] + 2.0, rect[2] - 1.0, rect[3] - 2.0]
+    // Tabs, as JEI's: the others behind the window, the selected one over
+    // its edge, joined to it.
+    let tab =
+        |game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, i: usize, rect: [f32; 4]| {
+            let selected = i == overlay.tab;
+            let r = if selected {
+                [rect[0], rect[1], rect[2] - 1.0, rect[3] + 3.0]
+            } else {
+                [rect[0], rect[1] + 2.0, rect[2] - 1.0, rect[3] - 2.0]
+            };
+            let sprite = if selected {
+                "tab_selected"
+            } else {
+                "tab_unselected"
+            };
+            if nine(game, batch, sprite, r, 4.0) {
+                if selected {
+                    game.native_fill(
+                        batch,
+                        [r[0] + 3.0, r[1] + r[3] - 5.0, r[2] - 6.0, 5.0],
+                        PANEL_BG,
+                    );
+                }
+            } else {
+                frame_box(game, batch, r);
+                if !selected {
+                    game.native_fill(batch, r, 0x30_00_00_00);
+                }
+            }
+            if let Some(icon) = overlay.tabs.get(i) {
+                let top = if selected { r[1] + 3.0 } else { r[1] + 2.0 };
+                draw_stack(game, batch, icon, [r[0] + 3.0, top, 18.0, 18.0]);
+            }
         };
-        frame_box(game, batch, r);
-        if !selected {
-            game.native_fill(batch, [r[0], r[1], r[2], r[3]], 0x30_00_00_00);
-        }
-        if let Some(icon) = overlay.tabs.get(*i) {
-            draw_stack(game, batch, icon, [r[0] + 3.0, r[1] + 2.0, 18.0, 18.0]);
-        }
+    for (i, rect) in g.tabs.iter().filter(|(i, _)| *i != overlay.tab) {
+        tab(game, batch, *i, *rect);
     }
     frame_box(game, batch, g.panel);
+    for (i, rect) in g.tabs.iter().filter(|(i, _)| *i == overlay.tab) {
+        tab(game, batch, *i, *rect);
+    }
     if !g.catalysts.is_empty() {
-        frame_box(game, batch, g.catalyst_panel);
+        let [x, y, w, h] = g.catalyst_panel;
+        if !nine(
+            game,
+            batch,
+            "catalyst_tab",
+            [x - 1.0, y - 1.0, w + 2.0, h + 2.0],
+            4.0,
+        ) {
+            frame_box(game, batch, g.catalyst_panel);
+        }
         for (stack, rect) in overlay.catalysts.iter().zip(&g.catalysts) {
             slot_box(game, batch, *rect);
             draw_stack(game, batch, stack, *rect);
@@ -1459,7 +1596,8 @@ fn overlay_pressed(
     modifiers: u32,
     canceled: &mut bool,
 ) {
-    let _ = modifiers;
+    // GLFW's shift bit: "+" with Shift moves as many sets as the items allow.
+    let shift = modifiers & 1 != 0;
     let gui = STATE.with(|s| s.borrow().gui);
     let hit = STATE.with(|s| {
         let state = s.borrow();
@@ -1514,7 +1652,7 @@ fn overlay_pressed(
             }
             Hit::Plus(view, true) if button == 0 => {
                 // JEI moves the items and goes back to the screen they went to.
-                state.pending.push(Event::Action(view));
+                state.pending.push(Event::Action(view, shift));
                 state.pending.push(Event::Close);
             }
             _ => {}

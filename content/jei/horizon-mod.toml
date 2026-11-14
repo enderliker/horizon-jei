@@ -1,0 +1,7 @@
+id = "jei"
+name = "JEI for Horizon (GUI sprites)"
+version = "0.2.1"
+description = "The recipe viewer's GUI sprites, from Just Enough Items 1.12 by mezz (MIT). Needs the JEI native mod."
+authors = ["enderliker", "J5Casey"]
+api = "0.2"
+side = "client"

@@ -3,11 +3,11 @@ id = "jei"
 version = "0.2.1"
 priority = 100
 
-# The commit this bundle was tested on (Nightly 2026-11-07). It hooks only the
+# The commit this bundle was tested on (Nightly 2026-11-13, 9f42064). It hooks only the
 # native hook points, so the launcher builds it on any Horizon whose hook
 # points are version 313 or later (compatibility.json, "hooks").
 [compatibility]
-horizon_revision = "6560641ba51a452f6bc2407baa4eb1b3be517ca8"
+horizon_revision = "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0"
 
 # runtime.rs becomes the module crate::game::jei.
 [[module]]
@@ -154,4 +154,25 @@ bindings = [
   { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
   { name = "stack", ty = "&horizon_client::items::ItemStack", value = "stack" },
   { name = "lines", ty = "&mut Vec<(horizon_client::text::Text, u32)>", value = "&mut *lines" },
+]
+# The server sends its recipes (the world's data packs merged) to the viewer:
+# a data pack's own recipes show, and the "+" names recipes the server has.
+
+[[injection]]
+id = "datapack_sync"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_datapack_sync"
+helper = "datapack_sync.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "recipe_types", ty = "&mut Vec<String>", value = "&mut *recipe_types" },
+]
+
+[[injection]]
+id = "recipes_received"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_recipes_received"
+helper = "recipes_received.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
 ]

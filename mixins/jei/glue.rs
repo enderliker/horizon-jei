@@ -31,6 +31,14 @@ struct State {
     pending: Vec<Event>,
     /// The bookmark under the left button, while it is down.
     drag: Option<Drag>,
+    /// The screen drawn last (`screen_render_post`): its id and menu type,
+    /// for the "+" (which grid is open). None once a frame passes without one.
+    screen: Option<(&'static str, Option<String>)>,
+    /// A screen was drawn since the last frame began.
+    screen_seen: bool,
+    /// The server's recipes arrived (`native_recipes_received`): build the
+    /// viewer again from them.
+    rebuild: bool,
 }
 
 /// A bookmark being dragged to another slot.
@@ -50,6 +58,9 @@ impl State {
             loaded: false,
             pending: Vec::new(),
             drag: None,
+            screen: None,
+            screen_seen: false,
+            rebuild: false,
         }
     }
 
@@ -152,6 +163,13 @@ pub(super) fn sync(game: &mut Game<'_>) {
     let enabled = game.native_on(jei::ID);
     let needs_build = STATE.with(|s| {
         let mut state = s.borrow_mut();
+        if !std::mem::take(&mut state.screen_seen) {
+            state.screen = None;
+        }
+        let rebuild = has_player && enabled && std::mem::take(&mut state.rebuild);
+        if rebuild {
+            state.session.clear();
+        }
         let needs_build = state.session.update(has_player, enabled);
         if !has_player {
             state.drag = None;
@@ -251,6 +269,11 @@ pub(super) fn screen_render_post(
     batch: &mut horizon_client::hud::HudBatch,
     screen: &NativeScreenView<'_>,
 ) {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.screen = Some((screen.id, screen.menu.map(str::to_owned)));
+        state.screen_seen = true;
+    });
     if !game.native_on(jei::ID) || !jei::overlay_screen(screen.id) {
         return;
     }
@@ -529,8 +552,27 @@ pub(super) fn clear_bookmarks() {
     });
 }
 
+/// The crafting grid of the screen drawn last: 0 when none takes recipes.
+fn open_grid() -> u32 {
+    STATE.with(|s| {
+        s.borrow().screen.as_ref().map_or(0, |(id, menu)| {
+            let mod_grid = menu
+                .as_deref()
+                .and_then(horizon_client::containers::mod_menu_type)
+                .and_then(|t| t.crafting)
+                .map(|c| c.size as u32);
+            jei::screen_grid(id, menu.as_deref(), mod_grid)
+        })
+    })
+}
+
+/// The server's recipes came in: the next frame builds the viewer from them.
+pub(super) fn recipes_received() {
+    STATE.with(|s| s.borrow_mut().rebuild = true);
+}
+
 fn dispatch(game: &mut Game<'_>, event: Event) {
-    let known = game.native_known_recipes();
+    let grid = open_grid();
     let recipe_key = game.native_mod_key(jei::ID, "recipe", "key.keyboard.r");
     let uses_key = game.native_mod_key(jei::ID, "uses", "key.keyboard.u");
     let give = jei::give(game.native_setting(jei::ID, "give").as_deref());
@@ -541,7 +583,7 @@ fn dispatch(game: &mut Game<'_>, event: Event) {
         give,
         // `native_give` succeeds in creative only: try, and fall back below.
         creative: give,
-        known: &known,
+        grid,
     };
 
     let mut fallback = false;
@@ -613,7 +655,10 @@ fn apply(game: &mut Game<'_>, out: Out) -> Result<(), String> {
             Ok(())
         }
         Out::Give { item, count } => game.native_give(&item, count),
-        Out::Place { book_id, all } => game.native_place_recipe(book_id, all),
+        Out::Transfer { book_id } => {
+            game.native_transfer_recipe(book_id);
+            Ok(())
+        }
         Out::Say(text) => {
             game.native_chat(&text);
             Ok(())

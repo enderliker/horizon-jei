@@ -470,6 +470,21 @@ fn token_hits(item: &SearchItem<'_>, token: &Query) -> bool {
 }
 
 /// Items the panel takes, and the most recipes a page shows.
+/// The recipe types the viewer asks the server for (`native_datapack_sync`):
+/// the kinds it shows, as the recipe files name them.
+pub const SYNCED_RECIPE_TYPES: &[&str] = &[
+    "minecraft:crafting_shaped",
+    "minecraft:crafting_shapeless",
+    "minecraft:crafting_transmute",
+    "minecraft:smelting",
+    "minecraft:blasting",
+    "minecraft:smoking",
+    "minecraft:campfire_cooking",
+    "minecraft:stonecutting",
+    "minecraft:smithing_transform",
+    "minecraft:smithing_trim",
+];
+
 pub const ITEMS_MAX: usize = 8192;
 pub const RECIPES_MAX: usize = 256;
 /// Stacks a slot cycles through.
@@ -676,8 +691,9 @@ pub enum Out {
     },
     /// Creative: give the player this item.
     Give { item: String, count: u32 },
-    /// Place this recipe-book id in the open grid.
-    Place { book_id: i32, all: bool },
+    /// Move the ingredients of this recipe-book id into the open crafting
+    /// grid (`native_transfer_recipe`): JEI's "+", which needs no unlock.
+    Transfer { book_id: i32 },
     /// A line only this player sees.
     Say(String),
 }
@@ -690,8 +706,9 @@ pub struct Context<'a> {
     pub give: bool,
     /// The game would give items (creative).
     pub creative: bool,
-    /// The recipe book's ids now.
-    pub known: &'a [i32],
+    /// The crafting grid of the open screen, 2 or 3 cells a side; 0 when no
+    /// crafting grid is open (the "+" is then off).
+    pub grid: u32,
 }
 
 /// How the item list is ordered.
@@ -1357,7 +1374,7 @@ impl Viewer {
     }
 
     /// Opens a page, pushing it on the history; says why when it is empty.
-    fn open(&mut self, item: &Stack, uses: bool, known: &[i32]) -> Vec<Out> {
+    fn open(&mut self, item: &Stack, uses: bool, grid: u32) -> Vec<Out> {
         let item = Stack {
             count: 1,
             ..item.clone()
@@ -1375,11 +1392,11 @@ impl Viewer {
             ))];
         }
         self.history.push(page);
-        vec![self.show(known)]
+        vec![self.show(grid)]
     }
 
     /// The page on top of the history, or the items when there is none.
-    fn show(&mut self, known: &[i32]) -> Out {
+    fn show(&mut self, grid: u32) -> Out {
         let Some(mut page) = self.history.last().cloned() else {
             self.shown.clear();
             return Out::Recipes {
@@ -1408,7 +1425,7 @@ impl Viewer {
         let views: Vec<View> = on_station
             .iter()
             .take(RECIPES_MAX)
-            .map(|&r| self.view(r, known))
+            .map(|&r| self.view(r, grid))
             .collect();
         self.shown = on_station
             .iter()
@@ -1440,7 +1457,7 @@ impl Viewer {
     }
 
     /// A recipe as the panel draws it.
-    fn view(&self, recipe: &Recipe, known: &[i32]) -> View {
+    fn view(&self, recipe: &Recipe, grid: u32) -> View {
         let slots = (recipe.slots.iter())
             .map(|slot| {
                 slot.iter()
@@ -1492,7 +1509,8 @@ impl Viewer {
             slots,
             results,
             note,
-            action: (recipe.book_id >= 0).then(|| known.contains(&recipe.book_id)),
+            action: (recipe.book_id >= 0 && recipe.kind.station() == Station::Crafting)
+                .then(|| fits(recipe, grid)),
         }
     }
 
@@ -1514,14 +1532,14 @@ impl Viewer {
                         count: if right { 99 } else { 1 },
                     }];
                 }
-                self.open(&stack, right, ctx.known)
+                self.open(&stack, right, ctx.grid)
             }
-            Event::Open { stack, uses } => self.open(&stack, uses, ctx.known),
+            Event::Open { stack, uses } => self.open(&stack, uses, ctx.grid),
             Event::Key { key, stack } => {
                 if key == ctx.recipe_key {
-                    self.open(&stack, false, ctx.known)
+                    self.open(&stack, false, ctx.grid)
                 } else if key == ctx.uses_key {
-                    self.open(&stack, true, ctx.known)
+                    self.open(&stack, true, ctx.grid)
                 } else {
                     Vec::new()
                 }
@@ -1530,21 +1548,39 @@ impl Viewer {
                 if let Some(page) = self.history.last_mut() {
                     page.tab = tab;
                 }
-                vec![self.show(ctx.known)]
+                vec![self.show(ctx.grid)]
             }
             Event::Back => {
                 self.history.pop();
-                vec![self.show(ctx.known)]
+                vec![self.show(ctx.grid)]
             }
-            Event::SlotClicked { stack, right } => self.open(&stack, right, ctx.known),
+            Event::SlotClicked { stack, right } => self.open(&stack, right, ctx.grid),
             Event::Action(i) => match self.shown.get(i) {
-                Some(&book) if book >= 0 => vec![Out::Place {
-                    book_id: book,
-                    all: false,
-                }],
+                Some(&book) if book >= 0 => vec![Out::Transfer { book_id: book }],
                 _ => Vec::new(),
             },
         }
+    }
+}
+
+/// Whether a crafting recipe fits a grid `grid` cells a side (JEI's "+" is
+/// red for a 3x3 recipe over the inventory's 2x2); no grid fits nothing.
+pub fn fits(recipe: &Recipe, grid: u32) -> bool {
+    let cells = match recipe.kind {
+        Kind::CraftingShaped => return recipe.width.max(recipe.height) <= grid && grid > 0,
+        _ => recipe.slots.iter().filter(|s| !s.is_empty()).count() as u32,
+    };
+    cells <= grid * grid && grid > 0
+}
+
+/// The grid of a screen: the inventory's own 2x2 (no menu), the crafting
+/// table's 3x3, or a mod menu type's crafting grid (`size`, from the game).
+pub fn screen_grid(id: &str, menu: Option<&str>, mod_grid: Option<u32>) -> u32 {
+    match (id, menu) {
+        ("inventory", None) => 2,
+        ("inventory", Some("minecraft:crafting")) => 3,
+        ("inventory", Some(_)) => mod_grid.unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -1984,13 +2020,13 @@ mod tests {
         (items, recipes)
     }
 
-    fn context(known: &[i32]) -> super::Context<'_> {
+    fn context(grid: u32) -> super::Context<'static> {
         super::Context {
             recipe_key: "key.keyboard.r",
             uses_key: "key.keyboard.u",
             give: false,
             creative: false,
-            known,
+            grid,
         }
     }
 
@@ -2008,9 +2044,9 @@ mod tests {
         let (items, recipes) = tables();
         let (mut viewer, out) = viewer(items, recipes, super::Lang::En);
         assert!(matches!(&out, super::Out::Items(list) if list.len() == 6));
-        let out = viewer.handle(super::Event::Search("diamond".into()), &context(&[]));
+        let out = viewer.handle(super::Event::Search("diamond".into()), &context(0));
         assert!(matches!(&out[0], super::Out::Items(list) if list.len() == 3));
-        let out = viewer.handle(super::Event::Search(String::new()), &context(&[]));
+        let out = viewer.handle(super::Event::Search(String::new()), &context(0));
         assert!(matches!(&out[0], super::Out::Items(list) if list.len() == 6));
     }
 
@@ -2023,7 +2059,7 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[7]),
+            &context(3),
         );
         let super::Out::Recipes {
             title,
@@ -2041,10 +2077,10 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].layout, super::Layout::Grid);
         assert_eq!(views[0].note, "Shapeless");
-        // The book holds recipe 7: the "+" is enabled.
+        // A crafting grid is open: the "+" is enabled, unlocked or not.
         assert_eq!(views[0].action, Some(true));
 
-        let out = viewer.handle(super::Event::Tab(1), &context(&[7]));
+        let out = viewer.handle(super::Event::Tab(1), &context(3));
         let super::Out::Recipes { tab, views, .. } = &out[0] else {
             panic!("not a page: {out:?}");
         };
@@ -2062,7 +2098,7 @@ mod tests {
                 key: "key.keyboard.u".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[]),
+            &context(0),
         );
         let super::Out::Recipes { title, tabs, .. } = &out[0] else {
             panic!("not a page: {out:?}");
@@ -2081,20 +2117,20 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[]),
+            &context(0),
         );
         viewer.handle(
             super::Event::Key {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:diamond_block"),
             },
-            &context(&[]),
+            &context(0),
         );
-        let out = viewer.handle(super::Event::Back, &context(&[]));
+        let out = viewer.handle(super::Event::Back, &context(0));
         assert!(
             matches!(&out[0], super::Out::Recipes { title, .. } if title == "Recipes: Diamond")
         );
-        let out = viewer.handle(super::Event::Back, &context(&[]));
+        let out = viewer.handle(super::Event::Back, &context(0));
         assert!(matches!(&out[0], super::Out::Recipes { views, .. } if views.is_empty()));
     }
 
@@ -2102,7 +2138,7 @@ mod tests {
     fn viewer_gives_only_in_creative() {
         let (items, recipes) = tables();
         let (mut viewer, _) = viewer(items, recipes, super::Lang::En);
-        let mut ctx = context(&[]);
+        let mut ctx = context(0);
         ctx.give = true;
         // The first item the search shows.
         viewer.handle(super::Event::Search("diamond".into()), &ctx);
@@ -2135,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn viewer_places_a_known_book_recipe() {
+    fn viewer_transfers_a_crafting_recipe() {
         let (items, recipes) = tables();
         let (mut viewer, _) = viewer(items, recipes, super::Lang::En);
         viewer.handle(
@@ -2143,27 +2179,74 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[7]),
+            &context(3),
         );
-        let out = viewer.handle(super::Event::Action(0), &context(&[7]));
-        assert_eq!(
-            out,
-            vec![super::Out::Place {
-                book_id: 7,
-                all: false
-            }]
-        );
+        let out = viewer.handle(super::Event::Action(0), &context(3));
+        assert_eq!(out, vec![super::Out::Transfer { book_id: 7 }]);
         // The smithing tab's recipe has no book id: its button does nothing.
         viewer.handle(
             super::Event::Key {
                 key: "key.keyboard.u".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[]),
+            &context(0),
         );
-        viewer.handle(super::Event::Tab(1), &context(&[]));
-        let out = viewer.handle(super::Event::Action(0), &context(&[]));
+        viewer.handle(super::Event::Tab(1), &context(0));
+        let out = viewer.handle(super::Event::Action(0), &context(0));
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn plus_needs_a_grid_the_recipe_fits() {
+        let (items, recipes) = tables();
+        let (mut viewer, _) = viewer(items, recipes.clone(), super::Lang::En);
+        let open = super::Event::Key {
+            key: "key.keyboard.r".into(),
+            stack: stack("minecraft:diamond"),
+        };
+        // No crafting screen open: the "+" is there but off.
+        let out = viewer.handle(open.clone(), &context(0));
+        let super::Out::Recipes { views, .. } = &out[0] else {
+            panic!("not a page: {out:?}");
+        };
+        assert_eq!(views[0].action, Some(false));
+        // The 2x2 grid takes a one-slot shapeless recipe.
+        let out = viewer.handle(super::Event::Back, &context(2));
+        assert!(matches!(&out[0], super::Out::Recipes { views, .. } if views.is_empty()));
+        let out = viewer.handle(open, &context(2));
+        let super::Out::Recipes { views, .. } = &out[0] else {
+            panic!("not a page: {out:?}");
+        };
+        assert_eq!(views[0].action, Some(true));
+
+        let mut big = recipes[2].clone();
+        (big.width, big.height) = (3, 3);
+        assert!(!super::fits(&big, 2));
+        assert!(super::fits(&big, 3));
+        let mut nine = recipes[0].clone();
+        nine.slots = vec![vec![ingredient(2)]; 9];
+        assert!(!super::fits(&nine, 2));
+        assert!(super::fits(&nine, 3));
+        assert!(!super::fits(&recipes[0], 0));
+    }
+
+    #[test]
+    fn screen_grids() {
+        assert_eq!(super::screen_grid("inventory", None, None), 2);
+        assert_eq!(
+            super::screen_grid("inventory", Some("minecraft:crafting"), None),
+            3
+        );
+        assert_eq!(
+            super::screen_grid("inventory", Some("minecraft:generic_9x3"), None),
+            0
+        );
+        assert_eq!(
+            super::screen_grid("inventory", Some("crafting_station:station"), Some(3)),
+            3
+        );
+        assert_eq!(super::screen_grid("creative", None, None), 0);
+        assert_eq!(super::screen_grid("mod", None, None), 0);
     }
 
     #[test]
@@ -2186,7 +2269,7 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:diamond"),
             },
-            &context(&[]),
+            &context(0),
         );
         let super::Out::Recipes { title, views, .. } = &out[0] else {
             panic!("not a page: {out:?}");
@@ -2198,7 +2281,7 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:stone"),
             },
-            &context(&[]),
+            &context(0),
         );
         assert_eq!(out, vec![super::Out::Say("Sin recetas para: Stone".into())]);
     }
@@ -2212,7 +2295,7 @@ mod tests {
                 key: "key.keyboard.r".into(),
                 stack: stack("minecraft:stone"),
             },
-            &context(&[]),
+            &context(0),
         );
         assert_eq!(out, vec![super::Out::Say("No recipes for: Stone".into())]);
     }
@@ -2430,7 +2513,7 @@ mod tests {
                 },
                 uses: false,
             },
-            &context(&[]),
+            &context(0),
         );
         assert!(matches!(&out[0], super::Out::Recipes { .. }), "{out:?}");
     }

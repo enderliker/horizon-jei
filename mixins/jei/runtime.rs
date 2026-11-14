@@ -661,8 +661,9 @@ pub struct Recipe {
 }
 
 /// How the panel lays a recipe out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Layout {
+    #[default]
     Grid,
     Cooking,
     Single,
@@ -674,13 +675,26 @@ pub enum Layout {
 
 /// One output of a mod category's recipe: a stack, its chance per operation
 /// (0 to 1), the count range when it drops and notes (conditions, tips).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Chance {
     pub stack: Stack,
     pub chance: f32,
     pub min: u32,
     pub max: u32,
     pub notes: Vec<String>,
+}
+
+impl Chance {
+    #[allow(dead_code)]
+    pub fn new(stack: Stack, chance: f32) -> Self {
+        Self {
+            stack,
+            chance,
+            min: 1,
+            max: 1,
+            notes: Vec::new(),
+        }
+    }
 }
 
 /// A recipe of a mod's own category (a loot table behind a fishing rod, a
@@ -750,7 +764,7 @@ pub fn count_range(min: u32, max: u32) -> String {
 }
 
 /// A recipe as the panel draws it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct View {
     pub layout: Layout,
     pub width: u32,
@@ -763,6 +777,38 @@ pub struct View {
     /// A category recipe's outputs (`Layout::Chance`); `results` holds their
     /// stacks too, in the same order.
     pub chances: Vec<Chance>,
+}
+
+impl View {
+    /// A standard recipe view without chance outputs.
+    #[allow(dead_code)]
+    pub fn new(
+        layout: Layout,
+        width: u32,
+        height: u32,
+        slots: Vec<Vec<Stack>>,
+        results: Vec<Stack>,
+        note: impl Into<String>,
+        action: Option<bool>,
+    ) -> Self {
+        Self {
+            layout,
+            width,
+            height,
+            slots,
+            results,
+            note: note.into(),
+            action,
+            chances: Vec::new(),
+        }
+    }
+
+    /// Attaches chance-based outputs to this recipe view.
+    #[allow(dead_code)]
+    pub fn with_chances(mut self, chances: Vec<Chance>) -> Self {
+        self.chances = chances;
+        self
+    }
 }
 
 /// What the player did, in the viewer's words.
@@ -3580,5 +3626,61 @@ mod tests {
                 .recipes,
             0
         );
+    }
+
+    #[test]
+    fn view_default_and_backward_compatibility() {
+        let def = super::View::default();
+        assert_eq!(def.layout, super::Layout::Grid);
+        assert_eq!(def.width, 0);
+        assert_eq!(def.height, 0);
+        assert!(def.slots.is_empty());
+        assert!(def.results.is_empty());
+        assert!(def.note.is_empty());
+        assert_eq!(def.action, None);
+        assert!(def.chances.is_empty());
+
+        // External mod ports (like AE2) initializing with 0.2-style fields and struct update syntax.
+        let view = super::View {
+            layout: super::Layout::Cooking,
+            width: 1,
+            height: 1,
+            slots: vec![vec![super::Stack::item("minecraft:raw_iron")]],
+            results: vec![super::Stack::item("minecraft:iron_ingot")],
+            note: "10.0 s".into(),
+            action: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(view.layout, super::Layout::Cooking);
+        assert!(view.chances.is_empty());
+
+        let constructed = super::View::new(
+            super::Layout::Single,
+            1,
+            1,
+            vec![],
+            vec![super::Stack::item("minecraft:stone")],
+            "cut",
+            None,
+        );
+        assert_eq!(constructed.layout, super::Layout::Single);
+        assert!(constructed.chances.is_empty());
+
+        let with_chances = super::View::new(
+            super::Layout::Chance,
+            2,
+            1,
+            vec![],
+            vec![super::Stack::item("minecraft:diamond")],
+            "chance",
+            None,
+        )
+        .with_chances(vec![super::Chance::new(
+            super::Stack::item("minecraft:diamond"),
+            0.25,
+        )]);
+        assert_eq!(with_chances.layout, super::Layout::Chance);
+        assert_eq!(with_chances.chances.len(), 1);
+        assert_eq!(with_chances.chances[0].chance, 0.25);
     }
 }

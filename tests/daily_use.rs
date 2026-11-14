@@ -1114,3 +1114,56 @@ fn test_mod_category_and_machine_catalyst_integration() {
         other => panic!("expected catalyst inscriber recipes: {other:?}"),
     }
 }
+
+#[test]
+fn test_view_default_and_backward_compatibility() {
+    let def = View::default();
+    assert_eq!(def.layout, Layout::Grid);
+    assert_eq!(def.width, 0);
+    assert_eq!(def.height, 0);
+    assert!(def.slots.is_empty());
+    assert!(def.results.is_empty());
+    assert!(def.note.is_empty());
+    assert_eq!(def.action, None);
+    assert!(def.chances.is_empty());
+
+    // 0.2-style literal using struct update syntax with ..Default::default():
+    let view = View {
+        layout: Layout::Cooking,
+        width: 1,
+        height: 1,
+        slots: vec![vec![Stack::item("minecraft:raw_iron")]],
+        results: vec![Stack::item("minecraft:iron_ingot")],
+        note: "10.0 s".into(),
+        action: Some(false),
+        ..Default::default()
+    };
+    assert_eq!(view.layout, Layout::Cooking);
+    assert!(view.chances.is_empty());
+
+    let v_new = View::new(
+        Layout::Single,
+        1,
+        1,
+        vec![vec![Stack::item("minecraft:stone")]],
+        vec![Stack::item("minecraft:stone_bricks")],
+        "Stonecutter",
+        None,
+    );
+    assert_eq!(v_new.layout, Layout::Single);
+    assert!(v_new.chances.is_empty());
+
+    let v_chances = View::new(
+        Layout::Chance,
+        1,
+        1,
+        vec![],
+        vec![Stack::item("minecraft:diamond")],
+        "",
+        None,
+    )
+    .with_chances(vec![Chance::new(Stack::item("minecraft:diamond"), 0.5)]);
+    assert_eq!(v_chances.layout, Layout::Chance);
+    assert_eq!(v_chances.chances.len(), 1);
+    assert_eq!(v_chances.chances[0].chance, 0.5);
+}

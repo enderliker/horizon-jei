@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased: the recipe screen, and a "+" that needs no unlock
+
+- **"+" works with no recipe-book unlock.** It moves a recipe in through
+  `native_transfer_recipe`, Horizon's viewer transfer, so it no longer needs the
+  recipe in the player's recipe book (JEI never did). It is on for a crafting
+  recipe whenever a grid it fits is open: the inventory's 2x2, the crafting
+  table, or a mod's crafting menu (a crafting station); grey elsewhere and for a
+  3x3 recipe over the 2x2. After a "+" the recipe screen closes on the grid.
+- **Data pack recipes.** The viewer asks the server for its recipe types
+  (`datapack_sync`) and rebuilds when they arrive (`recipes_received`), so a
+  data pack's own recipes are listed and their "+" names what the server has.
+- **JEI's own recipe screen.** R, U, a click in the list or on a bookmark now
+  open a window centred over the open screen, as JEI's `RecipesGui`: the tabs
+  above it, the tab's catalysts in a column at its left (a mod's crafting block
+  among the crafting table's), the tab's name and page arrows, as many recipes
+  a page as fit, a "+" on each crafting recipe, tooltips with the R/U counts.
+  Left click on a stack shows its recipes, right click its uses; R, U and A
+  work over its stacks. Escape and Backspace go back a page and close it at the
+  first; the wheel turns pages. The screen under it keeps its menu, grid and
+  cursor stack, and "+" fills that screen. The item list beside it and the
+  bookmarks still work. The 0.2 panel view stays on the settings page
+  ("Recipes: in the item panel").
+- **Categories of chances.** The core takes recipe categories whose outputs
+  drop with a chance (a fishing loot table, a sieve): their own tab, catalysts,
+  inputs, each output's chance (one decimal, "<0.1%"), count range and notes,
+  long ones over several pages. The game feeds them once Horizon has a hook
+  for mods to declare them.
+- Needs hook points 411 (`native_gui_draw_item_with`, `native_gui_tooltip`).
+
+
 ## 0.2.1 — World switch cache fix
 
 A patch release fixing viewer cache persistence across world transitions when JEI is disabled:

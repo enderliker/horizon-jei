@@ -21,7 +21,12 @@ container screens:
   bookmark away, and dragging reorders it. The bar is kept in
   `config/jei/bookmarks.txt` and comes back with the next world.
 - **Config**: `config/jei/jei.cfg` holds the list's order (`/jei sort name|id`)
-  and the two toggles on the mod's settings page (tooltip hints, the bar).
+  and the toggles on the mod's settings page (tooltip hints, the bar, where
+  recipes show).
+- **Recipe screen** (unreleased): R, U and clicks open JEI's own window over the
+  open screen, with tabs, catalysts, pages and a "+" that fills the grid under
+  it with no recipe-book unlock. Escape or Backspace goes back. The 0.2 panel
+  view is a setting.
 
 See [`docs/jei-parity.md`](docs/jei-parity.md) for the feature-by-feature state
 against JEI.

@@ -1,5 +1,5 @@
 // A click on the settings page: "Click gives items", the language, the list's
-// order, the tooltip hints and the bar.
+// order, the tooltip hints, the bar and where recipes show.
 fn jei_click(game: &mut crate::game::Game<'_>, mod_id: &str, button: usize) {
     use crate::game::jei as m;
     if mod_id != m::ID {
@@ -23,6 +23,10 @@ fn jei_click(game: &mut crate::game::Game<'_>, mod_id: &str, button: usize) {
         4 => {
             let config = crate::game::jei_glue::toggle_bar();
             game.native_chat(&lang.bookmarks_button(config.bookmarks));
+        }
+        5 => {
+            let config = crate::game::jei_glue::toggle_docked(game);
+            game.native_chat(&lang.recipes_button(config.docked));
         }
         _ => {}
     }

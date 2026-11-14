@@ -5,7 +5,7 @@ priority = 100
 
 # The commit this bundle was tested on (Nightly 2026-11-13, 9f42064). It hooks only the
 # native hook points, so the launcher builds it on any Horizon whose hook
-# points are version 313 or later (compatibility.json, "hooks").
+# points are version 411 or later (compatibility.json, "hooks").
 [compatibility]
 horizon_revision = "9f42064c11efe7ef3e5ed2baad7ddc2a3b36eea0"
 
@@ -101,6 +101,19 @@ bindings = [
   { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
 ]
 
+# The recipe screen draws after the whole GUI, so a mod's own screen (the
+# quest book draws in screen_render_post too) never covers it.
+[[injection]]
+id = "gui_post"
+kind = "HEAD"
+hook = "gui_render_post"
+hook_version = 1
+helper = "gui_post.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
+]
+
 [[injection]]
 id = "mouse_press"
 kind = "HEAD"
@@ -175,4 +188,47 @@ target = "horizon_client::game::native_hooks::Game<'_>::native_recipes_received"
 helper = "recipes_received.rs"
 bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]
+
+# The recipe screen: its pages turn with the wheel, Escape and Backspace go
+# back, the viewer's keys act on its stacks, and it closes with its screen.
+
+[[injection]]
+id = "mouse_scroll"
+kind = "HEAD"
+hook = "screen_mouse_scrolled_pre"
+hook_version = 1
+helper = "mouse_scroll.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
+  { name = "scroll", ty = "[f64; 2]", value = "scroll" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "key_press"
+kind = "HEAD"
+hook = "screen_key_pressed_pre"
+hook_version = 1
+helper = "key_press.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
+  { name = "key", ty = "&str", value = "key" },
+  { name = "repeat", ty = "bool", value = "repeat" },
+  { name = "modifiers", ty = "u32", value = "modifiers" },
+  { name = "canceled", ty = "&mut bool", value = "&mut *canceled" },
+]
+
+[[injection]]
+id = "screen_closing"
+kind = "HEAD"
+hook = "screen_closing"
+hook_version = 1
+helper = "screen_closing.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "screen", ty = "&crate::game::native_hooks::NativeScreenView<'_>", value = "screen" },
 ]

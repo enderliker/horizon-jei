@@ -1,5 +1,5 @@
 // The mod's settings page: give, language, the list's order, the tooltip
-// hints and the bar.
+// hints, the bar and where recipes show.
 fn jei_page(game: &mut crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
     use crate::game::jei as m;
     if mod_id != m::ID {
@@ -13,4 +13,5 @@ fn jei_page(game: &mut crate::game::Game<'_>, mod_id: &str, buttons: &mut Vec<St
     buttons.push(lang.sort_button(config.sort));
     buttons.push(lang.hints_button(config.hints));
     buttons.push(lang.bookmarks_button(config.bookmarks));
+    buttons.push(lang.recipes_button(config.docked));
 }

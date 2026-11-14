@@ -4,7 +4,7 @@
 use crate::game::Game;
 use crate::game::jei::{
     self, Bookmarks, Config, Context, Counts, Event, Ingredient, Item, Kind, Layout, Out, Recipe,
-    Session, Sort, Stack, Toggle, View, Viewer,
+    Session, Sort, Stack, Toggle, View, Viewer, screen as geo,
 };
 use crate::game::native_hooks::{
     NativePanelEvent, NativeRecipeKind, NativeRecipeLayout, NativeRecipeStack, NativeRecipeView,
@@ -36,9 +36,34 @@ struct State {
     screen: Option<(&'static str, Option<String>)>,
     /// A screen was drawn since the last frame began.
     screen_seen: bool,
+    /// Where this frame's screen is and the pointer, for the recipe screen
+    /// `gui_render_post` draws.
+    overlay_at: Option<([f32; 4], [f32; 2])>,
     /// The server's recipes arrived (`native_recipes_received`): build the
     /// viewer again from them.
     rebuild: bool,
+    /// JEI's recipe screen, while it is open.
+    overlay: Option<Overlay>,
+    /// The last press went to the recipe screen: its release and drags too.
+    overlay_pressed: bool,
+    /// The GUI's size at the last frame drawn, for the input hooks' hit tests.
+    gui: [f32; 2],
+    /// Stacks the overlay's keys bookmark at the next frame.
+    to_bookmark: Vec<Stack>,
+}
+
+/// The recipe screen: the viewer's page, the page of it shown, and whether
+/// JEI opened a screen of its own to show it (nothing was open).
+struct Overlay {
+    title: String,
+    tabs: Vec<Stack>,
+    names: Vec<String>,
+    tab: usize,
+    views: Vec<View>,
+    catalysts: Vec<Stack>,
+    subtitle: String,
+    page: usize,
+    own_screen: bool,
 }
 
 /// A bookmark being dragged to another slot.
@@ -60,7 +85,12 @@ impl State {
             drag: None,
             screen: None,
             screen_seen: false,
+            overlay_at: None,
             rebuild: false,
+            overlay: None,
+            overlay_pressed: false,
+            gui: [0.0, 0.0],
+            to_bookmark: Vec::new(),
         }
     }
 
@@ -191,6 +221,15 @@ pub(super) fn sync(game: &mut Game<'_>) {
     if sort != viewer.sort() {
         out = viewer.set_sort(sort);
     }
+    // A mod menu type with a crafting grid crafts as the crafting table: its
+    // block (the item of the same id) is one more crafting catalyst.
+    viewer.set_crafters(
+        horizon_client::containers::mod_menu_types()
+            .iter()
+            .filter(|t| t.crafting.is_some())
+            .map(|t| t.id.to_owned())
+            .collect(),
+    );
     STATE.with(|s| s.borrow_mut().session.set_viewer(viewer));
     if let Err(error) = apply(game, out) {
         game.native_chat(&format!("JEI: {error}"));
@@ -203,7 +242,16 @@ pub(super) fn flush(game: &mut Game<'_>) {
     if !game.native_on(jei::ID) {
         return;
     }
-    let pending: Vec<Event> = STATE.with(|s| std::mem::take(&mut s.borrow_mut().pending));
+    let (pending, marks) = STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        (
+            std::mem::take(&mut state.pending),
+            std::mem::take(&mut state.to_bookmark),
+        )
+    });
+    for stack in marks {
+        bookmark(game, stack);
+    }
     for event in pending {
         dispatch(game, event);
     }
@@ -264,6 +312,23 @@ fn remove_bookmark(index: usize) {
 
 /// The bookmark bar over a container screen: its slots, the item in each and
 /// the name of the one under the pointer, as the game finished drawing.
+/// The recipe screen, after the whole GUI: over the screen it opened on
+/// (`screen_render_post` said where that is this frame).
+pub(super) fn gui_render_post(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch) {
+    let at = STATE.with(|s| s.borrow_mut().overlay_at.take());
+    let Some((rect, mouse)) = at else {
+        return;
+    };
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    STATE.with(|s| {
+        if let Some(overlay) = s.borrow().overlay.as_ref() {
+            draw_overlay(game, batch, rect, mouse, overlay);
+        }
+    });
+}
+
 pub(super) fn screen_render_post(
     game: &Game<'_>,
     batch: &mut horizon_client::hud::HudBatch,
@@ -273,8 +338,15 @@ pub(super) fn screen_render_post(
         let mut state = s.borrow_mut();
         state.screen = Some((screen.id, screen.menu.map(str::to_owned)));
         state.screen_seen = true;
+        state.gui = [batch.width, batch.height];
     });
-    if !game.native_on(jei::ID) || !jei::overlay_screen(screen.id) {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    // The recipe screen itself draws in `gui_render_post`, over this screen
+    // and whatever a mod drew on it after us; it needs where this one is.
+    STATE.with(|s| s.borrow_mut().overlay_at = Some((screen.rect, screen.mouse)));
+    if !bar_screen(screen) {
         return;
     }
     load();
@@ -312,6 +384,12 @@ pub(super) fn screen_render_post(
         screen.mouse,
         &jei::bookmark_tooltip(&name, lang(game)),
     );
+}
+
+/// The screens the bookmark bar shows on: the containers', and any screen
+/// the recipe screen is open over.
+fn bar_screen(screen: &NativeScreenView<'_>) -> bool {
+    jei::overlay_screen(screen.id) || STATE.with(|s| s.borrow().overlay.is_some())
 }
 
 /// A small tooltip at the pointer: the overlay's slots are not the game's, so
@@ -355,7 +433,7 @@ pub(super) fn screen_mouse_pressed(
     modifiers: u32,
     canceled: &mut bool,
 ) {
-    if !game.native_on(jei::ID) || !jei::overlay_screen(screen.id) {
+    if !game.native_on(jei::ID) || !bar_screen(screen) {
         return;
     }
     load();
@@ -363,7 +441,12 @@ pub(super) fn screen_mouse_pressed(
         let state = s.borrow();
         (state.config, state.bookmarks.clone())
     });
-    if !config.bookmarks || bookmarks.is_empty() {
+    let on_bar = config.bookmarks
+        && jei::bookmark_slots()
+            .hit(screen.mouse, bookmarks.len())
+            .is_some();
+    if !on_bar {
+        overlay_pressed(game, screen, button, modifiers, canceled);
         return;
     }
     // The corner's places do not depend on the screen's height: a hit test
@@ -401,7 +484,14 @@ pub(super) fn screen_mouse_released(
     _modifiers: u32,
     canceled: &mut bool,
 ) {
-    if !game.native_on(jei::ID) || !jei::overlay_screen(screen.id) || button != 0 {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    if STATE.with(|s| std::mem::take(&mut s.borrow_mut().overlay_pressed)) {
+        *canceled = true;
+        return;
+    }
+    if !bar_screen(screen) || button != 0 {
         return;
     }
     let Some(drag) = STATE.with(|s| s.borrow_mut().drag.take()) else {
@@ -426,7 +516,14 @@ pub(super) fn screen_mouse_dragged(
     _modifiers: u32,
     canceled: &mut bool,
 ) {
-    if !game.native_on(jei::ID) || !jei::overlay_screen(screen.id) || button != 0 {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    if STATE.with(|s| s.borrow().overlay_pressed) {
+        *canceled = true;
+        return;
+    }
+    if !bar_screen(screen) || button != 0 {
         return;
     }
     let Some(mut drag) = STATE.with(|s| s.borrow().drag) else {
@@ -644,14 +741,67 @@ fn apply(game: &mut Game<'_>, out: Out) -> Result<(), String> {
             tabs,
             tab,
             views,
+            names,
+            catalysts,
+            subtitle,
         } => {
-            game.native_panel_recipes(
-                jei::ID,
-                &title,
-                to_native(tabs),
-                tab,
-                views.into_iter().map(native_view).collect(),
-            );
+            if config().docked {
+                game.native_panel_recipes(
+                    jei::ID,
+                    &title,
+                    to_native(tabs),
+                    tab,
+                    views.into_iter().flat_map(native_views).collect(),
+                );
+                return Ok(());
+            }
+            if views.is_empty() {
+                close_overlay(game);
+                return Ok(());
+            }
+            let (open, same) = STATE.with(|s| {
+                let state = s.borrow();
+                let open = state.overlay.as_ref();
+                (
+                    open.map(|o| o.own_screen),
+                    open.is_some_and(|o| o.title == title && o.tab == tab as usize),
+                )
+            });
+            // Nothing open (a lookup from the world): JEI's own screen holds it.
+            let own_screen = match open {
+                Some(own) => own,
+                None => {
+                    let nothing_open = STATE.with(|s| s.borrow().screen.is_none());
+                    nothing_open && game.native_mod_screen_open(jei::ID)
+                }
+            };
+            // Notes wrap to the window's width (196 at most, less its margins), so the
+            // geometry, which counts their lines, sizes them.
+            let mut views = views;
+            for view in &mut views {
+                if !view.note.is_empty() {
+                    view.note =
+                        jei::wrap(&view.note, 180.0, |t| game.native_text_width(t)).join("\n");
+                }
+            }
+            STATE.with(|s| {
+                let mut state = s.borrow_mut();
+                let page = match &state.overlay {
+                    Some(o) if same => o.page,
+                    _ => 0,
+                };
+                state.overlay = Some(Overlay {
+                    title,
+                    tabs,
+                    names,
+                    tab: tab as usize,
+                    views,
+                    catalysts,
+                    subtitle,
+                    page,
+                    own_screen,
+                });
+            });
             Ok(())
         }
         Out::Give { item, count } => game.native_give(&item, count),
@@ -706,6 +856,36 @@ fn item_stack(stack: &Stack) -> Option<ItemStack> {
     })
 }
 
+/// A view as the item panel draws it: a category recipe becomes one
+/// "input -> output" per output, its chance and count in the note.
+fn native_views(view: View) -> Vec<NativeRecipeView> {
+    if view.layout != Layout::Chance {
+        return vec![native_view(view)];
+    }
+    let input = view.slots.first().cloned().unwrap_or_default();
+    view.chances
+        .iter()
+        .map(|c| {
+            native_view(View {
+                layout: Layout::Single,
+                width: 1,
+                height: 1,
+                slots: vec![input.clone()],
+                results: vec![c.stack.clone()],
+                note: format!(
+                    "{} {}",
+                    jei::percent(c.chance),
+                    jei::count_range(c.min, c.max)
+                )
+                .trim_end()
+                .to_owned(),
+                action: None,
+                chances: Vec::new(),
+            })
+        })
+        .collect()
+}
+
 fn native_view(view: View) -> NativeRecipeView {
     NativeRecipeView {
         layout: match view.layout {
@@ -714,6 +894,7 @@ fn native_view(view: View) -> NativeRecipeView {
             Layout::Single => NativeRecipeLayout::Single,
             Layout::Smithing => NativeRecipeLayout::Smithing,
             Layout::Brewing => NativeRecipeLayout::Brewing,
+            Layout::Chance => NativeRecipeLayout::Single,
         },
         width: view.width,
         height: view.height,
@@ -812,4 +993,647 @@ fn kind(kind: NativeRecipeKind) -> Kind {
         NativeRecipeKind::Smithing => Kind::Smithing,
         NativeRecipeKind::Brewing => Kind::Brewing,
     }
+}
+
+// ---------------------------------------------------------------- the recipe screen
+
+const PANEL_BG: u32 = 0xFF_C6_C6_C6;
+const PANEL_LIGHT: u32 = 0xFF_FF_FF_FF;
+const PANEL_DARK: u32 = 0xFF_55_55_55;
+const OUTLINE: u32 = 0xFF_00_00_00;
+const SLOT_BG: u32 = 0xFF_8B_8B_8B;
+const SLOT_DARK: u32 = 0xFF_37_37_37;
+const TEXT: u32 = 0x40_40_40;
+const DIM: u32 = 0xA0_10_10_10;
+
+/// The recipe screen's parts now, from the GUI's size.
+fn overlay_geom(overlay: &Overlay, gui: [f32; 2]) -> geo::Geom {
+    geo::fitted(
+        gui,
+        overlay.tabs.len(),
+        overlay.tab,
+        overlay.catalysts.len(),
+        &overlay.views,
+    )
+}
+
+/// Closes the recipe screen (and JEI's own screen under it).
+fn close_overlay(game: &mut Game<'_>) {
+    let closed = STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.overlay_pressed = false;
+        state.overlay.take()
+    });
+    if closed.is_some_and(|o| o.own_screen) {
+        game.native_mod_screen_close(jei::ID);
+    }
+}
+
+/// The stack a slot of alternatives shows now: one a second, as JEI cycles.
+fn cycled(stacks: &[Stack]) -> Option<&Stack> {
+    if stacks.is_empty() {
+        return None;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as usize;
+    stacks.get(secs % stacks.len())
+}
+
+/// What is under the pointer on the recipe screen.
+#[derive(Clone, Debug, PartialEq)]
+enum Hit {
+    Tab(usize),
+    PrevTab,
+    NextTab,
+    PrevPage,
+    NextPage,
+    /// A stack: an input, a result, an output or a catalyst. `output` is
+    /// the category output's index in its view, for its tooltip.
+    Stack {
+        stack: Stack,
+        view: Option<usize>,
+        output: Option<usize>,
+    },
+    /// The "+" of a view, and whether it is on.
+    Plus(usize, bool),
+    /// Somewhere else on the window.
+    Inside,
+}
+
+/// Every hit place of the page shown, in drawing order.
+fn overlay_places(overlay: &Overlay, g: &geo::Geom) -> Vec<(Hit, [f32; 4])> {
+    let mut out = Vec::new();
+    for (i, rect) in &g.tabs {
+        out.push((Hit::Tab(*i), *rect));
+    }
+    if overlay.tabs.len() > 1 {
+        out.push((Hit::PrevTab, g.prev_tab));
+        out.push((Hit::NextTab, g.next_tab));
+    }
+    let pages = geo::pages(&overlay.views, g.content);
+    if pages.len() > 1 {
+        out.push((Hit::PrevPage, g.prev_page));
+        out.push((Hit::NextPage, g.next_page));
+    }
+    for (stack, rect) in overlay.catalysts.iter().zip(&g.catalysts) {
+        out.push((
+            Hit::Stack {
+                stack: stack.clone(),
+                view: None,
+                output: None,
+            },
+            *rect,
+        ));
+    }
+    let page = overlay.page.min(pages.len().saturating_sub(1));
+    let Some(pieces) = pages.get(page) else {
+        return out;
+    };
+    for (n, at) in geo::layout(&overlay.views, pieces, g.content) {
+        let piece = &pieces[n];
+        let view = &overlay.views[piece.view];
+        let placed = geo::place(view, piece, at, g.content[2]);
+        for (part, rect) in placed.slots {
+            let (stack, output) = match part {
+                geo::Part::Input(i) => (view.slots.get(i).and_then(|s| cycled(s)), None),
+                geo::Part::Result(i) => (view.results.get(i), Some(i)),
+            };
+            if let Some(stack) = stack {
+                out.push((
+                    Hit::Stack {
+                        stack: stack.clone(),
+                        view: Some(piece.view),
+                        output: output.filter(|_| view.layout == Layout::Chance),
+                    },
+                    rect,
+                ));
+            }
+        }
+        if let (Some(rect), Some(on)) = (placed.button, view.action) {
+            out.push((Hit::Plus(piece.view, on), rect));
+        }
+    }
+    out
+}
+
+/// The hit under `point`, if the point is on the recipe screen at all.
+fn overlay_hit(overlay: &Overlay, gui: [f32; 2], point: [f32; 2]) -> Option<Hit> {
+    let g = overlay_geom(overlay, gui);
+    let places = overlay_places(overlay, &g);
+    if let Some((hit, _)) = places.iter().rev().find(|(_, r)| jei::inside(point, *r)) {
+        return Some(hit.clone());
+    }
+    let on = jei::inside(point, g.panel)
+        || (!g.catalysts.is_empty() && jei::inside(point, g.catalyst_panel));
+    on.then_some(Hit::Inside)
+}
+
+fn frame_box(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, r: [f32; 4]) {
+    let [x, y, w, h] = r;
+    game.native_fill(batch, [x - 1.0, y - 1.0, w + 2.0, h + 2.0], OUTLINE);
+    game.native_fill(batch, r, PANEL_BG);
+    game.native_fill(batch, [x, y, w - 1.0, 1.0], PANEL_LIGHT);
+    game.native_fill(batch, [x, y, 1.0, h - 1.0], PANEL_LIGHT);
+    game.native_fill(batch, [x + 1.0, y + h - 1.0, w - 1.0, 1.0], PANEL_DARK);
+    game.native_fill(batch, [x + w - 1.0, y + 1.0, 1.0, h - 1.0], PANEL_DARK);
+}
+
+fn slot_box(game: &Game<'_>, batch: &mut horizon_client::hud::HudBatch, r: [f32; 4]) {
+    let [x, y, w, h] = r;
+    game.native_fill(batch, r, SLOT_BG);
+    game.native_fill(batch, [x, y, w - 1.0, 1.0], SLOT_DARK);
+    game.native_fill(batch, [x, y, 1.0, h - 1.0], SLOT_DARK);
+    game.native_fill(batch, [x + 1.0, y + h - 1.0, w - 1.0, 1.0], PANEL_LIGHT);
+    game.native_fill(batch, [x + w - 1.0, y + 1.0, 1.0, h - 1.0], PANEL_LIGHT);
+}
+
+fn button_box(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    r: [f32; 4],
+    label: &str,
+    on: bool,
+    hovered: bool,
+) {
+    let fill = match (on, hovered) {
+        (false, _) => 0xFF_6E_6E_6E,
+        (true, true) => 0xFF_8C_9A_D8,
+        (true, false) => 0xFF_A0_A0_A0,
+    };
+    game.native_fill(batch, r, OUTLINE);
+    game.native_fill(
+        batch,
+        [r[0] + 1.0, r[1] + 1.0, r[2] - 2.0, r[3] - 2.0],
+        fill,
+    );
+    let w = game.native_text_width(label);
+    let color = if on { 0xFF_FF_FF } else { 0xA0_A0_A0 };
+    game.native_text(
+        batch,
+        label,
+        [(r[0] + (r[2] - w) / 2.0).round(), r[1] + (r[3] - 8.0) / 2.0],
+        color,
+        true,
+    );
+}
+
+fn draw_stack(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    stack: &Stack,
+    r: [f32; 4],
+) {
+    if let Some(item) = item_stack(stack) {
+        let count = (stack.count > 1).then(|| stack.count.to_string());
+        game.native_gui_draw_item_with(batch, &item, [r[0] + 1.0, r[1] + 1.0], count.as_deref());
+    }
+}
+
+/// The text centred on `x`, cut with "..." to fit `max`.
+fn centred(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    text: &str,
+    x: f32,
+    y: f32,
+    max: f32,
+    rgb: u32,
+) {
+    let mut text = text.to_owned();
+    while game.native_text_width(&text) > max && text.chars().count() > 3 {
+        let keep: String = text.chars().take(text.chars().count() - 4).collect();
+        text = format!("{keep}...");
+    }
+    let w = game.native_text_width(&text);
+    game.native_text(batch, &text, [(x - w / 2.0).round(), y], rgb, false);
+}
+
+/// The recipe screen, over the screen at `rect` (`mouse`: the pointer).
+fn draw_overlay(
+    game: &Game<'_>,
+    batch: &mut horizon_client::hud::HudBatch,
+    rect: [f32; 4],
+    mouse: [f32; 2],
+    overlay: &Overlay,
+) {
+    let gui = [batch.width, batch.height];
+    let g = overlay_geom(overlay, gui);
+    let lang = lang(game);
+    // The screen under it dims, as under a vanilla screen opened over another.
+    game.native_fill(batch, rect, DIM);
+    let hit = overlay_hit(overlay, gui, mouse);
+    // Tabs: the selected one joins the window.
+    for (i, rect) in &g.tabs {
+        let selected = *i == overlay.tab;
+        let r = if selected {
+            [rect[0], rect[1], rect[2] - 1.0, rect[3] + 2.0]
+        } else {
+            [rect[0], rect[1] + 2.0, rect[2] - 1.0, rect[3] - 2.0]
+        };
+        frame_box(game, batch, r);
+        if !selected {
+            game.native_fill(batch, [r[0], r[1], r[2], r[3]], 0x30_00_00_00);
+        }
+        if let Some(icon) = overlay.tabs.get(*i) {
+            draw_stack(game, batch, icon, [r[0] + 3.0, r[1] + 2.0, 18.0, 18.0]);
+        }
+    }
+    frame_box(game, batch, g.panel);
+    if !g.catalysts.is_empty() {
+        frame_box(game, batch, g.catalyst_panel);
+        for (stack, rect) in overlay.catalysts.iter().zip(&g.catalysts) {
+            slot_box(game, batch, *rect);
+            draw_stack(game, batch, stack, *rect);
+        }
+    }
+    let name = overlay.names.get(overlay.tab).cloned().unwrap_or_default();
+    centred(
+        game,
+        batch,
+        &name,
+        g.title[0],
+        g.title[1],
+        g.panel[2] - 44.0,
+        TEXT,
+    );
+    if overlay.tabs.len() > 1 {
+        button_box(
+            game,
+            batch,
+            g.prev_tab,
+            "<",
+            true,
+            hit == Some(Hit::PrevTab),
+        );
+        button_box(
+            game,
+            batch,
+            g.next_tab,
+            ">",
+            true,
+            hit == Some(Hit::NextTab),
+        );
+    }
+    let pages = geo::pages(&overlay.views, g.content);
+    let page = overlay.page.min(pages.len().saturating_sub(1));
+    // A one-page category shows its whole subtitle there; more pages, the page too.
+    let line = match (overlay.subtitle.is_empty(), pages.len() > 1) {
+        (true, _) => lang.page_of(page, pages.len()),
+        (false, false) => overlay.subtitle.clone(),
+        (false, true) => format!("{}  {}", overlay.subtitle, lang.page_of(page, pages.len())),
+    };
+    // The page arrows flank the line only when there are pages to turn.
+    let room = if pages.len() > 1 {
+        g.panel[2] - 44.0
+    } else {
+        g.panel[2] - 12.0
+    };
+    centred(
+        game,
+        batch,
+        &line,
+        g.page_text[0],
+        g.page_text[1],
+        room,
+        0x60_60_60,
+    );
+    if pages.len() > 1 {
+        button_box(
+            game,
+            batch,
+            g.prev_page,
+            "<",
+            true,
+            hit == Some(Hit::PrevPage),
+        );
+        button_box(
+            game,
+            batch,
+            g.next_page,
+            ">",
+            true,
+            hit == Some(Hit::NextPage),
+        );
+    }
+    if let Some(pieces) = pages.get(page) {
+        for (n, at) in geo::layout(&overlay.views, pieces, g.content) {
+            let piece = &pieces[n];
+            let view = &overlay.views[piece.view];
+            let placed = geo::place(view, piece, at, g.content[2]);
+            for (part, rect) in &placed.slots {
+                slot_box(game, batch, *rect);
+                let stack = match part {
+                    geo::Part::Input(i) => view.slots.get(*i).and_then(|s| cycled(s)),
+                    geo::Part::Result(i) => view.results.get(*i),
+                };
+                if let Some(stack) = stack {
+                    draw_stack(game, batch, stack, *rect);
+                }
+                if let (geo::Part::Result(i), Layout::Chance) = (part, view.layout)
+                    && let Some(c) = view.chances.get(*i)
+                {
+                    let mark = if c.notes.is_empty() { "" } else { "*" };
+                    let x = rect[0] + geo::SLOT + 2.0;
+                    game.native_text(
+                        batch,
+                        &format!("{}{mark}", jei::percent(c.chance)),
+                        [x, rect[1] + 1.0],
+                        TEXT,
+                        false,
+                    );
+                    let range = jei::count_range(c.min, c.max);
+                    if !range.is_empty() {
+                        game.native_text(batch, &range, [x, rect[1] + 10.0], 0x70_70_70, false);
+                    }
+                }
+            }
+            if let Some([x, y, w, h]) = placed.arrow {
+                let mid = y + h / 2.0;
+                game.native_fill(batch, [x, mid - 2.0, w - 6.0, 4.0], 0xFF_8B_8B_8B);
+                game.native_quad(
+                    batch,
+                    [
+                        [x + w - 7.0, y],
+                        [x + w, mid],
+                        [x + w, mid],
+                        [x + w - 7.0, y + h],
+                    ],
+                    0xFF_8B_8B_8B,
+                );
+            }
+            if let (Some(rect), Some(on)) = (placed.button, view.action) {
+                let hovered = hit == Some(Hit::Plus(piece.view, on));
+                button_box(game, batch, rect, "+", on, hovered);
+            }
+            if !view.note.is_empty() && piece.outputs.start == 0 {
+                for (k, text) in view.note.split('\n').enumerate() {
+                    game.native_text(
+                        batch,
+                        text,
+                        [placed.notes[0], placed.notes[1] + k as f32 * geo::LINE],
+                        0x50_50_50,
+                        false,
+                    );
+                }
+            }
+        }
+    }
+    // The tooltip of what the pointer is on.
+    let lines: Vec<String> = match &hit {
+        Some(Hit::Stack {
+            stack,
+            view,
+            output,
+        }) => overlay_stack_lines(game, overlay, stack, *view, *output),
+        Some(Hit::Plus(_, on)) => vec![format!("§f{}", lang.transfer_hint(*on))],
+        Some(Hit::Tab(i)) => overlay
+            .names
+            .get(*i)
+            .map(|n| vec![format!("§f{n}")])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    if !lines.is_empty() {
+        let texts: Vec<horizon_client::text::Text> = lines
+            .iter()
+            .map(|l| horizon_client::text::Text::literal(l.as_str()).resolve_legacy())
+            .collect();
+        game.native_gui_tooltip(batch, &texts, mouse);
+    }
+}
+
+/// A stack's tooltip on the recipe screen: its name, a category output's
+/// chance, count and notes, and JEI's hints.
+fn overlay_stack_lines(
+    game: &Game<'_>,
+    overlay: &Overlay,
+    stack: &Stack,
+    view: Option<usize>,
+    output: Option<usize>,
+) -> Vec<String> {
+    let lang = lang(game);
+    let (name, counts) = STATE.with(|s| {
+        let state = s.borrow();
+        state
+            .viewer()
+            .map_or((stack.item.clone(), Counts::default()), |v| {
+                (
+                    v.item_name(&stack.item),
+                    v.counts(&stack.item, &stack.components),
+                )
+            })
+    });
+    let mut lines = vec![format!("§f{name}")];
+    if let (Some(v), Some(o)) = (view, output)
+        && let Some(c) = overlay.views.get(v).and_then(|v| v.chances.get(o))
+    {
+        let range = jei::count_range(c.min, c.max);
+        lines.push(format!(
+            "§e{}{}",
+            jei::percent(c.chance),
+            if range.is_empty() {
+                String::new()
+            } else {
+                format!(" {range}")
+            }
+        ));
+        for note in &c.notes {
+            lines.push(format!("§7{note}"));
+        }
+    }
+    let marked = STATE.with(|s| s.borrow().bookmarks.position(stack).is_some());
+    for (text, _) in jei::tooltip_lines(counts, marked, lang) {
+        lines.push(format!("§8{text}"));
+    }
+    lines
+}
+
+/// A press on the recipe screen: it takes every press on its window, and
+/// the presses on the screen under it (it is modal), but not the item list
+/// beside the screen or the bookmarks.
+fn overlay_pressed(
+    game: &Game<'_>,
+    screen: &NativeScreenView<'_>,
+    button: i32,
+    modifiers: u32,
+    canceled: &mut bool,
+) {
+    let _ = modifiers;
+    let gui = STATE.with(|s| s.borrow().gui);
+    let hit = STATE.with(|s| {
+        let state = s.borrow();
+        state
+            .overlay
+            .as_ref()
+            .map(|o| overlay_hit(o, gui, screen.mouse))
+    });
+    let Some(hit) = hit else {
+        return;
+    };
+    let Some(hit) = hit else {
+        // Outside the window: the item list (right of the screen's window)
+        // still takes clicks; the screen under the window doesn't.
+        let beside = screen.mouse[0] >= screen.rect[0] + screen.rect[2];
+        if !(beside && jei::overlay_screen(screen.id)) {
+            *canceled = true;
+            STATE.with(|s| s.borrow_mut().overlay_pressed = true);
+        }
+        return;
+    };
+    *canceled = true;
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.overlay_pressed = true;
+        let tabs = state.overlay.as_ref().map_or(0, |o| o.tabs.len());
+        let tab = state.overlay.as_ref().map_or(0, |o| o.tab);
+        let pages = state.overlay.as_ref().map_or(1, |o| {
+            geo::pages(&o.views, overlay_geom(o, gui).content)
+                .len()
+                .max(1)
+        });
+        match hit {
+            Hit::Tab(i) => state.pending.push(Event::Tab(i)),
+            Hit::PrevTab if tabs > 0 => state.pending.push(Event::Tab((tab + tabs - 1) % tabs)),
+            Hit::NextTab if tabs > 0 => state.pending.push(Event::Tab((tab + 1) % tabs)),
+            Hit::PrevPage | Hit::NextPage => {
+                if let Some(o) = state.overlay.as_mut() {
+                    let page = o.page.min(pages - 1);
+                    o.page = if hit == Hit::NextPage {
+                        (page + 1) % pages
+                    } else {
+                        (page + pages - 1) % pages
+                    };
+                }
+            }
+            Hit::Stack { stack, .. } if button == 0 || button == 1 => {
+                state.pending.push(Event::Open {
+                    stack,
+                    uses: button == 1,
+                });
+            }
+            Hit::Plus(view, true) if button == 0 => {
+                // JEI moves the items and goes back to the screen they went to.
+                state.pending.push(Event::Action(view));
+                state.pending.push(Event::Close);
+            }
+            _ => {}
+        }
+    });
+    let _ = game;
+}
+
+/// The wheel over the recipe screen turns its pages.
+pub(super) fn screen_mouse_scrolled(
+    game: &Game<'_>,
+    screen: &NativeScreenView<'_>,
+    scroll: [f64; 2],
+    _modifiers: u32,
+    canceled: &mut bool,
+) {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        let gui = state.gui;
+        let Some(o) = state.overlay.as_mut() else {
+            return;
+        };
+        if overlay_hit(o, gui, screen.mouse).is_none() || scroll[1] == 0.0 {
+            return;
+        }
+        *canceled = true;
+        let pages = geo::pages(&o.views, overlay_geom(o, gui).content)
+            .len()
+            .max(1);
+        let page = o.page.min(pages - 1);
+        o.page = if scroll[1] < 0.0 {
+            (page + 1).min(pages - 1)
+        } else {
+            page.saturating_sub(1)
+        };
+    });
+}
+
+/// Keys on the recipe screen: Escape and Backspace go back a page (closing
+/// it at the first), and the viewer's keys (recipes, uses, bookmark) act on
+/// the stack under the pointer.
+pub(super) fn screen_key_pressed(
+    game: &Game<'_>,
+    screen: &NativeScreenView<'_>,
+    key: &str,
+    _repeat: bool,
+    _modifiers: u32,
+    canceled: &mut bool,
+) {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    let gui = STATE.with(|s| s.borrow().gui);
+    let hit = STATE.with(|s| {
+        let state = s.borrow();
+        state
+            .overlay
+            .as_ref()
+            .map(|o| overlay_hit(o, gui, screen.mouse))
+    });
+    let Some(hit) = hit else {
+        return;
+    };
+    if key == "key.keyboard.escape" || (key == "key.keyboard.backspace" && hit.is_some()) {
+        *canceled = true;
+        pending(Event::Back);
+        return;
+    }
+    let recipe = game.native_mod_key(jei::ID, "recipe", "key.keyboard.r");
+    let uses = game.native_mod_key(jei::ID, "uses", "key.keyboard.u");
+    let mark = game.native_mod_key(jei::ID, "bookmark", jei::BOOKMARK_KEY);
+    if ![&recipe, &uses, &mark].contains(&&key.to_owned()) || hit.is_none() {
+        return;
+    }
+    // Over the window, its keys never reach the slots hidden under it.
+    *canceled = true;
+    let Some(Hit::Stack { stack, .. }) = hit else {
+        return;
+    };
+    if key == mark {
+        STATE.with(|s| s.borrow_mut().to_bookmark.push(stack));
+    } else {
+        pending(Event::Open {
+            stack,
+            uses: key == uses,
+        });
+    }
+}
+
+/// The screen under the recipe screen closed (or JEI's own did): so does
+/// the recipe screen, and the viewer forgets its history.
+pub(super) fn screen_closing(game: &Game<'_>, _screen: &NativeScreenView<'_>) {
+    if !game.native_on(jei::ID) {
+        return;
+    }
+    let open = STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        if let Some(o) = state.overlay.as_mut() {
+            // JEI's own screen is closing: nothing to close after it.
+            o.own_screen = false;
+            true
+        } else {
+            false
+        }
+    });
+    if open {
+        pending(Event::Close);
+    }
+}
+
+/// The settings page's "Recipes" button: the recipe screen or the panel.
+pub(super) fn toggle_docked(game: &mut Game<'_>) -> Config {
+    let mut config = config();
+    config.docked = !config.docked;
+    store_config(config);
+    close_overlay(game);
+    dispatch(game, Event::Close);
+    config
 }

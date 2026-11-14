@@ -9,7 +9,7 @@
 /// The mod's id: its row, its settings folder and its keys.
 pub const ID: &str = "jei";
 pub const NAME: &str = "JEI";
-pub const VERSION: &str = "0.2.1";
+pub const VERSION: &str = "0.3.0";
 pub const DESCRIPTION: &str = "An item and recipe viewer: every item beside container screens, with search, recipes, uses and bookmarks.";
 
 /// The hook points' version this build needs: the newest point it hooks
@@ -587,6 +587,18 @@ pub enum Station {
 }
 
 impl Station {
+    #[allow(dead_code)]
+    pub const ALL: [Station; 8] = [
+        Station::Crafting,
+        Station::Furnace,
+        Station::BlastFurnace,
+        Station::Smoker,
+        Station::Campfire,
+        Station::Stonecutter,
+        Station::Smithing,
+        Station::Brewing,
+    ];
+
     /// The item whose icon stands for the station in the tabs.
     pub fn icon(self) -> &'static str {
         match self {
@@ -1426,6 +1438,13 @@ fn subtype_matches(have: &str, want: &str) -> bool {
 }
 
 impl Viewer {
+    /// 0.1's constructor, without variants: the JEI kit before version 3 (in AE2 15.4.16 and older ports) builds its
+    /// layer with it, so those ports still build with this JEI.
+    #[allow(dead_code)]
+    pub fn new(items: Vec<Item>, recipes: Vec<Recipe>, lang: Lang) -> (Self, Out) {
+        Self::with_variants(items, recipes, Vec::new(), lang)
+    }
+
     /// A viewer with the world's tables and the variants they name (potions,
     /// tipped arrows); the output lists every item.
     pub fn with_variants(
@@ -2280,7 +2299,7 @@ impl Session {
 mod tests {
     #[test]
     fn title_has_name_and_version() {
-        assert_eq!(super::title(), "JEI 0.2.1");
+        assert_eq!(super::title(), "JEI 0.3.0");
     }
 
     #[test]

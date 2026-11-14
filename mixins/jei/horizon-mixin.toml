@@ -1,6 +1,6 @@
 [mod]
 id = "jei"
-version = "0.2.1"
+version = "0.3.0"
 priority = 100
 
 # The commit this bundle was tested on (Nightly 2026-11-13, 9f42064). It hooks only the
@@ -23,6 +23,68 @@ id = "glue"
 file = "crates/horizon-client/src/game.rs"
 name = "jei_glue"
 source = "glue.rs"
+
+[[crate]]
+id = "optional"
+path = "optional"
+
+# ---- BEGIN JEI KIT / MOD API
+
+[[module]]
+id = "jei-kit-marker"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_jeikit_v15_jei"
+source = "kit_marker.rs"
+
+[[module]]
+id = "jei-kit-collection"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_kit_collection_jei"
+source = "kit_collection.rs"
+
+[[module]]
+id = "jei-kit-math"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_kit_math_jei"
+source = "kit_math.rs"
+
+[[module]]
+id = "jei-kit-collection-size"
+file = "crates/horizon-client/src/game/native_panel.rs"
+name = "hz_kit_panel_jei"
+source = "kit_panel.rs"
+
+[[module]]
+id = "jei-kit-loot-items"
+file = "crates/horizon-items/src/items.rs"
+name = "hz_kit_loot_jei"
+source = "kit_loot_items.rs"
+
+[[module]]
+id = "jei-kit-loot-keys"
+file = "crates/horizon-world/src/loot.rs"
+name = "hz_kit_keys_jei"
+source = "kit_loot_keys.rs"
+
+[[module]]
+id = "jei-kit-window"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_kit_window_jei"
+source = "kit_window.rs"
+
+[[module]]
+id = "jei-kit-creative"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_kit_creative_jei"
+source = "kit_creative.rs"
+
+[[module]]
+id = "jei-kit-layer"
+file = "crates/horizon-client/src/game.rs"
+name = "hz_kit_layer_jei"
+source = "kit_layer.rs"
+
+# ---- END JEI KIT / MOD API
 
 [[injection]]
 id = "frame"

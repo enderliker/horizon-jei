@@ -7,5 +7,16 @@ fn jei_mouse_press(
     modifiers: u32,
     canceled: &mut bool,
 ) {
+    if crate::game::hz_kit_window_jei::is_open() {
+        crate::game::hz_kit_window_jei::press(
+            game,
+            [game.cursor.0, game.cursor.1],
+            button,
+            canceled,
+        );
+        if *canceled {
+            return;
+        }
+    }
     crate::game::jei_glue::screen_mouse_pressed(game, screen, button, modifiers, canceled);
 }

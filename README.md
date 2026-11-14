@@ -5,7 +5,7 @@ reimplementation of Minecraft: Java Edition 26.3. It is a port of
 [JustEnoughItems](https://github.com/mezz/JustEnoughItems) (JEI), rebuilt on
 Horizon's native hook points.
 
-Status: **0.2.1 "Overlay and bookmarks"**. On top of 0.1's panel viewer (every
+Status: **0.3.0 "Recipe screen, Mod API and bookmarks"**. On top of 0.2's overlay and bookmarks (every
 item, JEI's search grammar, R/U over any stack, a tab per station, recipe
 pages, "+", creative give, English and Spanish), the mod now draws over
 container screens:

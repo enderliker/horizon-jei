@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased: the recipe screen, and a "+" that needs no unlock
+## 0.3.0 — 2026-11-14
 
+- **Mod API & JEI Kit support.** Added public integration API (`hz_jeikit_v15_jei`, `hz_kit_layer_jei::register`, `hz_kit_window_jei`, `hz_kit_math_jei`, `hz_kit_loot_jei`, `hz_kit_keys_jei`, `hz_kit_panel_jei`) and the optional proc-macro crate (`mixins/jei/optional/`), allowing third-party mods (AE2, Elevator, Iron Furnaces, etc.) to register custom tabs, cards, and recipes seamlessly.
 - **"+" works with no recipe-book unlock.** It moves a recipe in through
   `native_transfer_recipe`, Horizon's viewer transfer, so it no longer needs the
   recipe in the player's recipe book (JEI never did). It is on for a crafting

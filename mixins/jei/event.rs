@@ -8,4 +8,5 @@ fn jei_event(
         return;
     }
     crate::game::jei_glue::event(game, event);
+    crate::game::hz_kit_layer_jei::event(game, mod_id, event);
 }

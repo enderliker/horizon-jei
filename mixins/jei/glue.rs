@@ -159,6 +159,25 @@ pub(super) fn config() -> Config {
     STATE.with(|s| s.borrow().config)
 }
 
+/// Whether the official recipe overlay is currently open over a screen.
+pub(in crate::game) fn is_overlay_open() -> bool {
+    STATE.with(|s| s.borrow().overlay.is_some())
+}
+
+/// Closes the overlay state directly without screen callbacks.
+pub(in crate::game) fn close_overlay_state() {
+    STATE.with(|s| {
+        let mut state = s.borrow_mut();
+        state.overlay_pressed = false;
+        state.overlay = None;
+    });
+}
+
+/// Whether docked panel mode is enabled in configuration.
+pub(in crate::game) fn is_docked() -> bool {
+    config().docked
+}
+
 fn store_config(config: Config) {
     STATE.with(|s| s.borrow_mut().config = config);
     write(config_path(), &config.to_text());
@@ -783,6 +802,7 @@ fn apply(game: &mut Game<'_>, out: Out) -> Result<(), String> {
                         jei::wrap(&view.note, 168.0, |t| game.native_text_width(t)).join("\n");
                 }
             }
+            crate::game::hz_kit_window_jei::close();
             STATE.with(|s| {
                 let mut state = s.borrow_mut();
                 let page = match &state.overlay {

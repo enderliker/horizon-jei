@@ -6,6 +6,10 @@ fn jei_mouse_scroll(
     modifiers: u32,
     canceled: &mut bool,
 ) {
+    if crate::game::jei_glue::is_overlay_open() {
+        crate::game::jei_glue::screen_mouse_scrolled(game, screen, scroll, modifiers, canceled);
+        return;
+    }
     if crate::game::hz_kit_window_jei::is_open() {
         crate::game::hz_kit_window_jei::scroll(scroll[1], canceled);
         if *canceled {

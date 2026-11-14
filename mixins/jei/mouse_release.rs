@@ -7,6 +7,10 @@ fn jei_mouse_release(
     modifiers: u32,
     canceled: &mut bool,
 ) {
+    if crate::game::jei_glue::is_overlay_open() {
+        crate::game::jei_glue::screen_mouse_released(game, screen, button, modifiers, canceled);
+        return;
+    }
     if crate::game::hz_kit_window_jei::is_open() {
         crate::game::hz_kit_window_jei::release([game.cursor.0, game.cursor.1]);
     }

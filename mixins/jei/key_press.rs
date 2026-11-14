@@ -8,6 +8,10 @@ fn jei_key_press(
     modifiers: u32,
     canceled: &mut bool,
 ) {
+    if crate::game::jei_glue::is_overlay_open() {
+        crate::game::jei_glue::screen_key_pressed(game, screen, key, repeat, modifiers, canceled);
+        return;
+    }
     if crate::game::hz_kit_window_jei::is_open() {
         crate::game::hz_kit_window_jei::key(game, [game.cursor.0, game.cursor.1], key, canceled);
         if *canceled {

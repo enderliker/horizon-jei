@@ -240,6 +240,7 @@ jei_optional::if_kit_jei_items!("jei", {
 
     /// Shows a page, keeping the card page when it is the same one.
     pub(in crate::game) fn show(title: String, tabs: Vec<Tab>, tab: usize) {
+        crate::game::jei_glue::close_overlay_state();
         WINDOW.with_borrow_mut(|w| {
             let page = w
                 .as_ref()
@@ -426,7 +427,7 @@ jei_optional::if_kit_jei_items!("jei", {
 
     /// Draws the window over the screen.
     pub(in crate::game) fn draw_window(game: &Game<'_>, batch: &mut HudBatch) {
-        if is_open() && !guide_is_open() {
+        if is_open() && !guide_is_open() && !crate::game::jei_glue::is_overlay_open() {
             tint(game, batch);
             draw(game, batch);
         }

@@ -13,6 +13,7 @@ jei_optional::if_kit_jei_items!("jei", {
     }
 
     /// The stack the panel shows at `index` for `mod_id` (its own list: with JEI's variants, sorted and searched as shown).
+    #[allow(dead_code)] // The mod API: other mods call it; JEI alone does not.
     pub(crate) fn listed_at(
         game: &Game<'_>,
         mod_id: &str,

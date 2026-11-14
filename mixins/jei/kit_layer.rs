@@ -45,6 +45,7 @@ jei_optional::if_kit_jei_items!("jei", {
         /// The "+" pressed there.
         pub(in crate::game) plus: fn(&mut Game<'_>, usize),
         /// A click on this stack opens its recipes even when JEI's clicks give items.
+        #[allow(dead_code)] // The mod API: read by mods or click dispatch.
         pub(in crate::game) opens_on_click: fn(&Stack) -> bool,
     }
 
@@ -326,44 +327,13 @@ jei_optional::if_kit_jei_items!("jei", {
                     count: 1,
                     components: stack.components.clone(),
                 };
-                if *key == recipe_key || *key == uses_key {
-                    open(game, stack, *key == uses_key, &ctx);
-                } else if crate::game::hz_kit_window_jei::guide_hotkey(game)
-                    .is_some_and(|h| *key == h)
-                {
+                if crate::game::hz_kit_window_jei::guide_hotkey(game).is_some_and(|h| *key == h) {
                     // The guide: its key over an item, the panel's too.
                     crate::game::hz_kit_window_jei::guide_open(game, &stack.item);
                 }
             }
-            NativePanelEvent::Clicked { index, right } => {
-                // The panel's own list says what was clicked (it has JEI's variants and sort; the layer's copy may not).
-                let stack = crate::game::native_panel::hz_kit_panel_jei::listed_at(
-                    game,
-                    jei::ID,
-                    *index as usize,
-                )
-                .map(|s| Stack {
-                    item: s.item,
-                    count: 1,
-                    components: s.components,
-                })
-                .or_else(|| {
-                    LAYER.with_borrow(|l| {
-                        l.as_ref()
-                            .and_then(|l| l.listed.get(*index as usize).cloned())
-                    })
-                });
-                // In "click gives items" mode JEI gives it (or opens it in survival); otherwise its recipes. What a
-                // provider added to the list is its own, so JEI has nothing to give: its recipe.
-                let own = stack
-                    .as_ref()
-                    .is_some_and(|s| providers().iter().any(|p| (p.opens_on_click)(s)));
-                if jei::give(game.native_setting(jei::ID, "give").as_deref()) && !own {
-                    return;
-                }
-                if let Some(stack) = stack {
-                    open(game, stack, *right, &ctx);
-                }
+            NativePanelEvent::Clicked { .. } => {
+                // JEI's native viewer (jei_glue) handles panel clicks directly.
             }
             _ => {}
         }
@@ -702,8 +672,14 @@ jei_optional::if_kit_jei_items!("jei", {
         }
         crate::game::hz_kit_collection_jei::frame(game);
         crate::game::hz_kit_creative_jei::frame(game);
-        if crate::game::native_panel::hz_kit_panel_jei::has_recipes(game) {
+        if !crate::game::jei_glue::is_docked()
+            && crate::game::native_panel::hz_kit_panel_jei::has_recipes(game)
+        {
             game.native_panel_recipes(jei::ID, "", Vec::new(), 0, Vec::new());
+        }
+        if crate::game::jei_glue::is_overlay_open() && crate::game::hz_kit_window_jei::is_open() {
+            crate::game::hz_kit_window_jei::close();
+            clear_history();
         }
         // The window goes with its screen.
         // (The Win screen has no draw hook the window is drawn on: it would be there unseen, taking the input.)

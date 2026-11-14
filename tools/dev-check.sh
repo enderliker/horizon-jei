@@ -17,7 +17,7 @@ cd "$mod"
 
 echo "== fmt"
 cargo fmt --check
-rustfmt --edition 2024 --check mixins/jei/*.rs
+rustfmt --edition 2024 --check mixins/jei/*.rs tests/*.rs
 
 echo "== clippy"
 cargo clippy --all-targets -- -D warnings
